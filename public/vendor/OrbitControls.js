@@ -86,8 +86,14 @@
 
 			this.touches = {
 				ONE: THREE.TOUCH.ROTATE,
-				TWO: THREE.TOUCH.DOLLY_PAN
+				TWO: THREE.TOUCH.DOLLY_PAN,
+				THREE: THREE.TOUCH.ROTATE
 			}; // for reset
+
+			this.minTargetX = - 106;
+			this.maxTargetX = 106;
+			this.minTargetZ = - 106;
+			this.maxTargetZ = 106;
 
 			this.target0 = this.target.clone();
 			this.position0 = this.object.position.clone();
@@ -211,6 +217,18 @@
 
 					}
 
+					if ( typeof scope.minTargetX === 'number' && typeof scope.maxTargetX === 'number' ) {
+
+						scope.target.x = Math.max( scope.minTargetX, Math.min( scope.maxTargetX, scope.target.x ) );
+
+					}
+
+					if ( typeof scope.minTargetZ === 'number' && typeof scope.maxTargetZ === 'number' ) {
+
+						scope.target.z = Math.max( scope.minTargetZ, Math.min( scope.maxTargetZ, scope.target.z ) );
+
+					}
+
 					offset.setFromSpherical( spherical ); // rotate offset back to "camera-up-vector-is-up" space
 
 					offset.applyQuaternion( quatInverse );
@@ -281,7 +299,8 @@
 				TOUCH_ROTATE: 3,
 				TOUCH_PAN: 4,
 				TOUCH_DOLLY_PAN: 5,
-				TOUCH_DOLLY_ROTATE: 6
+				TOUCH_DOLLY_ROTATE: 6,
+				TOUCH_THREE_ROTATE: 7
 			};
 			let state = STATE.NONE;
 			const EPS = 0.000001; // current position in spherical coordinates
@@ -569,6 +588,12 @@
 
 					rotateStart.set( event.touches[ 0 ].pageX, event.touches[ 0 ].pageY );
 
+				} else if ( event.touches.length >= 3 ) {
+
+					const x3 = ( event.touches[ 0 ].pageX + event.touches[ 1 ].pageX + event.touches[ 2 ].pageX ) / 3;
+					const y3 = ( event.touches[ 0 ].pageY + event.touches[ 1 ].pageY + event.touches[ 2 ].pageY ) / 3;
+					rotateStart.set( x3, y3 );
+
 				} else {
 
 					const x = 0.5 * ( event.touches[ 0 ].pageX + event.touches[ 1 ].pageX );
@@ -623,6 +648,12 @@
 				if ( event.touches.length == 1 ) {
 
 					rotateEnd.set( event.touches[ 0 ].pageX, event.touches[ 0 ].pageY );
+
+				} else if ( event.touches.length >= 3 ) {
+
+					const x3 = ( event.touches[ 0 ].pageX + event.touches[ 1 ].pageX + event.touches[ 2 ].pageX ) / 3;
+					const y3 = ( event.touches[ 0 ].pageY + event.touches[ 1 ].pageY + event.touches[ 2 ].pageY ) / 3;
+					rotateEnd.set( x3, y3 );
 
 				} else {
 
@@ -878,10 +909,7 @@
 
 			}
 
-			function onTouchStart( event ) {
-
-				if ( scope.enabled === false ) return;
-				event.preventDefault(); // prevent scrolling
+			function applyTouchGestureForCount( event ) {
 
 				switch ( event.touches.length ) {
 
@@ -916,6 +944,12 @@
 								state = STATE.TOUCH_DOLLY_PAN;
 								break;
 
+							case THREE.TOUCH.PAN:
+								if ( scope.enablePan === false ) return;
+								handleTouchStartPan( event );
+								state = STATE.TOUCH_PAN;
+								break;
+
 							case THREE.TOUCH.DOLLY_ROTATE:
 								if ( scope.enableZoom === false && scope.enableRotate === false ) return;
 								handleTouchStartDollyRotate( event );
@@ -929,10 +963,42 @@
 
 						break;
 
+					case 3:
+						switch ( scope.touches.THREE !== undefined ? scope.touches.THREE : THREE.TOUCH.ROTATE ) {
+
+							case THREE.TOUCH.ROTATE:
+							case THREE.TOUCH.DOLLY_ROTATE:
+								if ( scope.enableRotate === false ) return;
+								handleTouchStartRotate( event );
+								state = STATE.TOUCH_THREE_ROTATE;
+								break;
+
+							case THREE.TOUCH.PAN:
+								if ( scope.enablePan === false ) return;
+								handleTouchStartPan( event );
+								state = STATE.TOUCH_PAN;
+								break;
+
+							default:
+								state = STATE.NONE;
+
+						}
+
+						break;
+
 					default:
 						state = STATE.NONE;
 
 				}
+
+			}
+
+			function onTouchStart( event ) {
+
+				if ( scope.enabled === false ) return;
+				event.preventDefault(); // prevent scrolling
+
+				applyTouchGestureForCount( event );
 
 				if ( state !== STATE.NONE ) {
 
@@ -950,6 +1016,7 @@
 				switch ( state ) {
 
 					case STATE.TOUCH_ROTATE:
+					case STATE.TOUCH_THREE_ROTATE:
 						if ( scope.enableRotate === false ) return;
 						handleTouchMoveRotate( event );
 						scope.update();
@@ -984,8 +1051,17 @@
 
 				if ( scope.enabled === false ) return;
 				handleTouchEnd( event );
-				scope.dispatchEvent( _endEvent );
-				state = STATE.NONE;
+
+				if ( event.touches && event.touches.length > 0 ) {
+
+					applyTouchGestureForCount( event );
+
+				} else {
+
+					scope.dispatchEvent( _endEvent );
+					state = STATE.NONE;
+
+				}
 
 			}
 

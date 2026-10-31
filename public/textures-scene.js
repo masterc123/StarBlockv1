@@ -754,9 +754,12 @@ controls.maxPolarAngle = Math.PI / 2 - 0.12;
 controls.minDistance = 14;
 controls.maxDistance = 145;
 controls.mouseButtons = { LEFT: null, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
+controls.touches = { ONE: null, TWO: THREE.TOUCH.DOLLY_PAN, THREE: THREE.TOUCH.ROTATE };
 if (IS_MOBILE) {
-    // 1 finger = game input (place / select), 2 fingers = pan + pinch zoom + orbit
-    controls.touches = { ONE: null, TWO: THREE.TOUCH.DOLLY_PAN };
+    // 1 finger = game input (place / select), 2 fingers = pan/move camera (+ pinch zoom), 3 fingers = rotate camera viewing direction
+    controls.touches = { ONE: null, TWO: THREE.TOUCH.DOLLY_PAN, THREE: THREE.TOUCH.ROTATE };
+    controls.panSpeed = 1.15;
+    controls.rotateSpeed = 0.85;
     camera.position.set(30, 52, 74);
     controls.maxDistance = 165;
 }

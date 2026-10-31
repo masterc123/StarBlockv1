@@ -10820,7 +10820,31 @@ function animate(now) {
 
                 // Helper to advance a ground Zerg unit toward a target position with guaranteed fallback movement & unsticking
                 const advanceGroundZergToward = (goalPos) => {
-                    if (!goalPos) return false;
+                    if (!goalPos) {
+                        e.stopReason = 'no_goal_pos';
+                        return false;
+                    }
+                    e.currentDestination = { x: Number(goalPos.x.toFixed(2)), z: Number(goalPos.z.toFixed(2)) };
+                    e.distanceToDestination = Number(Math.hypot(goalPos.x - e.mesh.position.x, goalPos.z - e.mesh.position.z).toFixed(2));
+                    e.currentSpeed = Number(effEnemySpeed.toFixed(2));
+
+                    // Immediate spawn/structure overlap push-out so Zerg units never get trapped inside their own Hive/Pool/Warren footprint
+                    for (let ebi = 0; ebi < enemyBuildings.length; ebi++) {
+                        const eb = enemyBuildings[ebi];
+                        if (!eb || eb.hp <= 0 || !eb.pos) continue;
+                        const ebRad = (eb.footprintRadius || 2.1) + (e.radius || 0.5) * 0.45;
+                        const bdx = e.mesh.position.x - eb.pos.x;
+                        const bdz = e.mesh.position.z - eb.pos.z;
+                        const bDist = Math.hypot(bdx, bdz);
+                        if (bDist < ebRad) {
+                            const pushAng = bDist > 0.05 ? Math.atan2(bdx, bdz) : Math.atan2(goalPos.x - eb.pos.x, goalPos.z - eb.pos.z);
+                            const pushStep = Math.max(effEnemySpeed * dt * 1.35, (ebRad - bDist) + 0.18);
+                            e.mesh.position.x += Math.sin(pushAng) * pushStep;
+                            e.mesh.position.z += Math.cos(pushAng) * pushStep;
+                            e.mesh.position.y = getTerrainHeight(e.mesh.position.x, e.mesh.position.z);
+                        }
+                    }
+
                     const navPt = getGroundNavigationWaypoint(e.mesh.position, goalPos, e) || goalPos;
                     const stepDir = computeSafeGroundStep(e.mesh.position, navPt, effEnemySpeed, dt, e, enemies, buildings, enemyBuildings);
                     let didMove = false;
@@ -10828,38 +10852,59 @@ function animate(now) {
                         e.mesh.position.addScaledVector(stepDir, effEnemySpeed * dt);
                         alignGroundUnitToTerrain(e.mesh, e.mesh.position.x + stepDir.x, e.mesh.position.z + stepDir.z, dt);
                         e.lastNavResult = 'waypoint_step';
+                        e.stopReason = 'none';
                         e.lastMoveTime = state.elapsedSec;
                         didMove = true;
                     } else {
-                        // Fallback Direct Steering when computeSafeGroundStep returns zero vector
+                        // Multi-Ring Fallback Direct Steering when computeSafeGroundStep returns zero vector
                         const fdx = navPt.x - e.mesh.position.x;
                         const fdz = navPt.z - e.mesh.position.z;
                         const fLen = Math.hypot(fdx, fdz);
                         if (fLen > 0.05) {
                             const baseAng = Math.atan2(fdx, fdz);
-                            const tryAngles = [0, 0.52, -0.52, 1.05, -1.05, 1.57, -1.57];
-                            const stepLen = effEnemySpeed * dt;
-                            for (let aIdx = 0; aIdx < tryAngles.length; aIdx++) {
-                                const ang = baseAng + tryAngles[aIdx];
-                                const sx = Math.sin(ang);
-                                const sz = Math.cos(ang);
-                                const nx = e.mesh.position.x + sx * stepLen;
-                                const nz = e.mesh.position.z + sz * stepLen;
-                                if (typeof isWalkableGround !== 'function' || isWalkableGround(nx, nz, (e.radius || 0.5) * 0.45) || aIdx === tryAngles.length - 1) {
-                                    e.mesh.position.x = nx;
-                                    e.mesh.position.z = nz;
-                                    alignGroundUnitToTerrain(e.mesh, nx + sx, nz + sz, dt);
-                                    e.lastNavResult = aIdx === 0 ? 'direct_fallback' : 'angled_fallback';
-                                    e.lastMoveTime = state.elapsedSec;
-                                    didMove = true;
-                                    break;
+                            const tryAngles = [0, 0.45, -0.45, 0.92, -0.92, 1.45, -1.45, 2.1, -2.1, Math.PI];
+                            const stepLen = Math.max(0.04, effEnemySpeed * dt);
+                            const probeRings = [stepLen, Math.max(stepLen * 2.5, 0.55), 1.35];
+                            let escaped = false;
+                            for (let rIdx = 0; rIdx < probeRings.length && !escaped; rIdx++) {
+                                const probeDist = probeRings[rIdx];
+                                for (let aIdx = 0; aIdx < tryAngles.length; aIdx++) {
+                                    const ang = baseAng + tryAngles[aIdx];
+                                    const sx = Math.sin(ang);
+                                    const sz = Math.cos(ang);
+                                    const px = e.mesh.position.x + sx * probeDist;
+                                    const pz = e.mesh.position.z + sz * probeDist;
+                                    if (typeof isWalkableGround !== 'function' || isWalkableGround(px, pz, (e.radius || 0.5) * 0.35)) {
+                                        e.mesh.position.x += sx * stepLen;
+                                        e.mesh.position.z += sz * stepLen;
+                                        alignGroundUnitToTerrain(e.mesh, e.mesh.position.x + sx, e.mesh.position.z + sz, dt);
+                                        e.lastNavResult = aIdx === 0 ? 'direct_fallback' : 'angled_fallback';
+                                        e.stopReason = 'none';
+                                        e.lastMoveTime = state.elapsedSec;
+                                        didMove = true;
+                                        escaped = true;
+                                        break;
+                                    }
                                 }
+                            }
+                            if (!escaped) {
+                                // Unconditional forward slide toward goal so a unit never freezes in place
+                                const sx = Math.sin(baseAng);
+                                const sz = Math.cos(baseAng);
+                                e.mesh.position.x += sx * stepLen;
+                                e.mesh.position.z += sz * stepLen;
+                                alignGroundUnitToTerrain(e.mesh, e.mesh.position.x + sx, e.mesh.position.z + sz, dt);
+                                e.lastNavResult = 'forced_slide_fallback';
+                                e.stopReason = 'none';
+                                e.lastMoveTime = state.elapsedSec;
+                                didMove = true;
                             }
                         } else {
                             e.lastNavResult = 'at_waypoint';
+                            e.stopReason = 'reached_waypoint';
                         }
                     }
-                    // Always runworld-position stuck detection even when stepDir was zero
+                    // Always run world-position stuck detection even when stepDir was zero
                     checkAndUnstickGroundUnit(e, navPt, dt);
                     return didMove;
                 };
@@ -11134,6 +11179,7 @@ function animate(now) {
                     if ((e.variant === 'behemoth' || e.variant === 'gorgon') && bestDist <= Math.max(e.range || 8.0, engageRange)) {
                         e.aiState = 'ATTACKING';
                         e.lastNavResult = 'in_attack_range';
+                        e.stopReason = 'in_attack_range';
                         if (e.cooldown <= 0) {
                             e.mesh.userData.attackAnim = 1.0;
                             _muzzleScratch.set(e.mesh.position.x, e.mesh.position.y + (e.variant === 'gorgon' ? 1.55 : 1.1), e.mesh.position.z);
@@ -11151,6 +11197,7 @@ function animate(now) {
                     } else if (bestDist <= engageRange) {
                         e.aiState = 'ATTACKING';
                         e.lastNavResult = 'in_attack_range';
+                        e.stopReason = 'in_attack_range';
                         if (e.isAir) {
                             smoothAirVehicleTransform(e, tPos.x, tPos.z, 5.8, false, dt);
                         } else {
@@ -11196,6 +11243,9 @@ function animate(now) {
                         }
                     } else if (e.isAir) {
                         e.aiState = 'MOVING';
+                        e.currentDestination = { x: Number(attackNavTarget.x.toFixed(2)), z: Number(attackNavTarget.z.toFixed(2)) };
+                        e.distanceToDestination = Number(Math.hypot(attackNavTarget.x - e.mesh.position.x, attackNavTarget.z - e.mesh.position.z).toFixed(2));
+                        e.currentSpeed = Number(effEnemySpeed.toFixed(2));
                         const dxAir = attackNavTarget.x - e.mesh.position.x;
                         const dzAir = attackNavTarget.z - e.mesh.position.z;
                         const lenAir = Math.hypot(dxAir, dzAir) || 1;
@@ -11203,6 +11253,7 @@ function animate(now) {
                         e.mesh.position.z += (dzAir / lenAir) * effEnemySpeed * dt;
                         smoothAirVehicleTransform(e, attackNavTarget.x, attackNavTarget.z, 5.8, true, dt);
                         e.lastNavResult = 'air_direct';
+                        e.stopReason = 'none';
                         e.lastMoveTime = state.elapsedSec;
                         moving = true;
                     } else {
@@ -12027,6 +12078,10 @@ function animate(now) {
         _portrait3DAccum = 0;
     }
 
+    if (window.TANK_TRACK_SYSTEM && typeof window.TANK_TRACK_SYSTEM.update === 'function') {
+        window.TANK_TRACK_SYSTEM.update(dt);
+    }
+
     if (perfProf) perfProf.begin('renderScene');
     renderer.render(scene, camera);
     if (perfProf) {
@@ -12651,6 +12706,10 @@ window.resetMatchForNewMap = function(newSeed) {
     fowVisible.fill(0);
     fowSmoothAlpha.fill(215);
 
+    if (window.TANK_TRACK_SYSTEM && typeof window.TANK_TRACK_SYSTEM.clear === 'function') {
+        window.TANK_TRACK_SYSTEM.clear();
+    }
+
     // 6. Rebuild Drop-Zone Barriers & Base Placement Ghost on the new terrain
     buildBasePlacementBarrierMeshes();
     rebuildGhostModel('base');
@@ -12834,14 +12893,23 @@ syncAiAllyButtons();
 
 // ============================================================================
 // TOP-RIGHT 3D AXIS BALL CAMERA EYE PERSPECTIVE CONTROLLER
-// Interactive 3D Orientation Sphere Gizmo: Drag to orbit/tilt camera eye
-// perspective or click any 3D axis node (TOP, N, S, E, W, TAC) to orient view.
-// Strictly keeps camera upright (polar angle clamped to [0.14, 0.94] rad).
+// Real Three.js 3D Sphere Gizmo: Renders a lit 3D procedural planet sphere,
+// orbital latitude/longitude rings, and 3D axis nodes inside #axis-ball-canvas.
+// Drag to orbit/tilt camera eye perspective or click any 3D axis node (TOP, N, S, E, W, TAC).
 // ============================================================================
 const AXIS_BALL_CONTROLLER = {
     canvas: null,
     ctx: null,
     readoutEl: null,
+    glCanvas: null,
+    glRenderer: null,
+    glScene: null,
+    glCamera: null,
+    planetMesh: null,
+    atmoCageMesh: null,
+    equatorRingMesh: null,
+    axisGroup: null,
+    lastBiome: null,
     isDragging: false,
     dragMoved: false,
     lastPointerX: 0,
@@ -12861,6 +12929,113 @@ const AXIS_BALL_CONTROLLER = {
         const dpr = Math.min(window.devicePixelRatio || 1, 2);
         canvas.width = Math.round(78 * dpr);
         canvas.height = Math.round(78 * dpr);
+
+        // Initialize dedicated Three.js 3D WebGL scene for the 3D UI Sphere
+        try {
+            const glCanvas = document.createElement('canvas');
+            glCanvas.width = canvas.width;
+            glCanvas.height = canvas.height;
+            const glRenderer = new THREE.WebGLRenderer({
+                canvas: glCanvas,
+                alpha: true,
+                antialias: true,
+                powerPreference: 'low-power'
+            });
+            glRenderer.setSize(canvas.width, canvas.height, false);
+            glRenderer.setClearColor(0x000000, 0);
+
+            const glScene = new THREE.Scene();
+            const glCamera = new THREE.PerspectiveCamera(34, 1.0, 0.1, 20.0);
+            glCamera.position.set(0, 0, 3.85);
+            glCamera.lookAt(0, 0, 0);
+
+            const ambLight = new THREE.AmbientLight(0x90b8d8, 0.95);
+            const keyLight = new THREE.DirectionalLight(0xffffff, 1.45);
+            keyLight.position.set(2.5, 3.2, 3.0);
+            const rimLight = new THREE.DirectionalLight(0x00e5ff, 0.85);
+            rimLight.position.set(-2.5, -1.8, -1.5);
+            glScene.add(ambLight, keyLight, rimLight);
+
+            const axisGroup = new THREE.Group();
+            glScene.add(axisGroup);
+
+            // 1. Central 3D Planet Sphere with Biome-Reactive Surface Material
+            const sphereGeo = new THREE.SphereGeometry(0.68, 28, 22);
+            const sphereMat = new THREE.MeshStandardMaterial({
+                color: 0x1d4ed8,
+                emissive: 0x091e3a,
+                emissiveIntensity: 0.45,
+                roughness: 0.48,
+                metalness: 0.28
+            });
+            const planetMesh = new THREE.Mesh(sphereGeo, sphereMat);
+            axisGroup.add(planetMesh);
+
+            // 2. Outer 3D Geodesic Atmosphere / Orbital Telemetry Shell
+            const cageGeo = new THREE.SphereGeometry(0.76, 14, 10);
+            const cageMat = new THREE.MeshBasicMaterial({
+                color: 0x38bdf8,
+                wireframe: true,
+                transparent: true,
+                opacity: 0.22
+            });
+            const atmoCageMesh = new THREE.Mesh(cageGeo, cageMat);
+            axisGroup.add(atmoCageMesh);
+
+            // 3. 3D Equatorial Horizon Gimbal Ring & Polar Meridian Ring
+            const eqGeo = new THREE.TorusGeometry(0.92, 0.018, 10, 48);
+            eqGeo.rotateX(Math.PI / 2);
+            const eqMat = new THREE.MeshStandardMaterial({
+                color: 0x38bdf8,
+                emissive: 0x0284c7,
+                emissiveIntensity: 0.65,
+                roughness: 0.3,
+                metalness: 0.7
+            });
+            const equatorRingMesh = new THREE.Mesh(eqGeo, eqMat);
+            axisGroup.add(equatorRingMesh);
+
+            const merGeo = new THREE.TorusGeometry(0.88, 0.012, 8, 40);
+            const merMat = new THREE.MeshBasicMaterial({ color: 0x94a3b8, transparent: true, opacity: 0.32 });
+            const merRing = new THREE.Mesh(merGeo, merMat);
+            axisGroup.add(merRing);
+
+            // 4. 3D Axis Stems & 3D Spherical Terminal Caps (+X, -X, +Y, +Z, -Z)
+            const addAxis3D = (dirVec, hexColor, isPrimary) => {
+                const len = 1.02;
+                const stemGeo = new THREE.CylinderGeometry(isPrimary ? 0.028 : 0.018, isPrimary ? 0.028 : 0.018, len, 8);
+                stemGeo.translate(0, len * 0.5, 0);
+                const stemMat = new THREE.MeshStandardMaterial({
+                    color: hexColor,
+                    emissive: hexColor,
+                    emissiveIntensity: 0.35,
+                    roughness: 0.35,
+                    metalness: 0.5
+                });
+                const stemMesh = new THREE.Mesh(stemGeo, stemMat);
+                stemMesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dirVec.clone().normalize());
+                axisGroup.add(stemMesh);
+
+                const capGeo = new THREE.SphereGeometry(isPrimary ? 0.14 : 0.105, 14, 12);
+                const capMesh = new THREE.Mesh(capGeo, stemMat);
+                capMesh.position.copy(dirVec).multiplyScalar(len);
+                axisGroup.add(capMesh);
+            };
+            addAxis3D(new THREE.Vector3(1, 0, 0), 0xff4d6d, true);
+            addAxis3D(new THREE.Vector3(-1, 0, 0), 0x9f1239, false);
+            addAxis3D(new THREE.Vector3(0, 1, 0), 0x00ff66, true);
+            addAxis3D(new THREE.Vector3(0, 0, 1), 0x00e5ff, true);
+            addAxis3D(new THREE.Vector3(0, 0, -1), 0x0369a1, false);
+
+            this.glCanvas = glCanvas;
+            this.glRenderer = glRenderer;
+            this.glScene = glScene;
+            this.glCamera = glCamera;
+            this.planetMesh = planetMesh;
+            this.atmoCageMesh = atmoCageMesh;
+            this.equatorRingMesh = equatorRingMesh;
+            this.axisGroup = axisGroup;
+        } catch (_) {}
 
         const getLocalCoords = (e) => {
             const rect = canvas.getBoundingClientRect();
@@ -12942,6 +13117,40 @@ const AXIS_BALL_CONTROLLER = {
         });
     },
 
+    syncBiomeTheme() {
+        const biome = window.ACTIVE_PLANET_BIOME || 'highland';
+        if (!this.planetMesh || this.lastBiome === biome) return;
+        this.lastBiome = biome;
+        const mat = this.planetMesh.material;
+        const cageMat = this.atmoCageMesh ? this.atmoCageMesh.material : null;
+        if (biome === 'lava') {
+            mat.color.setHex(0x3a140c);
+            mat.emissive.setHex(0xff3b00);
+            mat.emissiveIntensity = 0.72;
+            if (cageMat) cageMat.color.setHex(0xff6a00);
+        } else if (biome === 'ocean') {
+            mat.color.setHex(0x0284c7);
+            mat.emissive.setHex(0x0c4a6e);
+            mat.emissiveIntensity = 0.52;
+            if (cageMat) cageMat.color.setHex(0x38bdf8);
+        } else if (biome === 'desert') {
+            mat.color.setHex(0xd97706);
+            mat.emissive.setHex(0x451a03);
+            mat.emissiveIntensity = 0.40;
+            if (cageMat) cageMat.color.setHex(0xfbbf24);
+        } else if (biome === 'jungle') {
+            mat.color.setHex(0x15803d);
+            mat.emissive.setHex(0x052e16);
+            mat.emissiveIntensity = 0.45;
+            if (cageMat) cageMat.color.setHex(0x4ade80);
+        } else {
+            mat.color.setHex(0x1d4ed8);
+            mat.emissive.setHex(0x0f2942);
+            mat.emissiveIntensity = 0.45;
+            if (cageMat) cageMat.color.setHex(0x38bdf8);
+        }
+    },
+
     getCameraSpherical() {
         const ox = camera.position.x - controls.target.x;
         const oy = camera.position.y - controls.target.y;
@@ -12985,12 +13194,12 @@ const AXIS_BALL_CONTROLLER = {
         if (window.SFX) window.SFX.playClick();
         const sph = this.getCameraSpherical();
         let targetAzimuth = sph.azimuth;
-        let targetPolar = 0.72; // Default ~41° from vertical (49° elevation above ground — upright tactical view)
+        let targetPolar = 0.72;
         let targetRadius = Math.max(38.0, Math.min(68.0, sph.radius));
 
         const key = String(viewId || 'tac').toLowerCase();
         if (key === 'top' || key === '+y') {
-            targetPolar = 0.15; // High-altitude overhead command perspective
+            targetPolar = 0.15;
             targetRadius = Math.max(54.0, targetRadius);
             this.setActivePresetBadge('top');
         } else if (key === 'tac') {
@@ -13046,10 +13255,10 @@ const AXIS_BALL_CONTROLLER = {
             }
         }
 
-        this.renderGizmo();
+        this.renderGizmo(dt);
     },
 
-    renderGizmo() {
+    renderGizmo(dt = 0.016) {
         const ctx = this.ctx;
         const w = this.canvas.width;
         const h = this.canvas.height;
@@ -13060,29 +13269,41 @@ const AXIS_BALL_CONTROLLER = {
         ctx.clearRect(0, 0, w, h);
 
         const sph = this.getCameraSpherical();
-        // Elevation angle above horizontal ground in degrees (90° = straight overhead, 36°..55° = tactical isometric)
         const elevDeg = Math.round(90 - THREE.MathUtils.radToDeg(sph.polar));
         if (this.readoutEl) {
             this.readoutEl.innerText = `${elevDeg}° UP`;
         }
 
-        // Camera view basis vectors (Right, Up, Forward) for projecting 3D gizmo axes
         const sinAz = Math.sin(sph.azimuth);
         const cosAz = Math.cos(sph.azimuth);
         const sinPol = Math.sin(sph.polar);
         const cosPol = Math.cos(sph.polar);
 
-        // Right vector in world XZ
         const rx = cosAz, ry = 0, rz = -sinAz;
-        // Up vector in camera screen plane
         const ux = -cosPol * sinAz, uy = sinPol, uz = -cosPol * cosAz;
-        // View direction from target to camera eye
         const vx = sinPol * sinAz, vy = cosPol, vz = sinPol * cosAz;
+
+        // Render the real Three.js 3D Sphere & Axis Gizmo
+        if (this.glRenderer && this.glScene && this.glCamera && this.axisGroup) {
+            this.syncBiomeTheme();
+            if (this.atmoCageMesh) {
+                this.atmoCageMesh.rotation.y += dt * 0.35;
+            }
+            const rotMat = new THREE.Matrix4().set(
+                rx, ux, vx, 0,
+                ry, uy, vy, 0,
+                rz, uz, vz, 0,
+                0,  0,  0,  1
+            ).transpose();
+            this.axisGroup.quaternion.setFromRotationMatrix(rotMat);
+            this.glRenderer.render(this.glScene, this.glCamera);
+            ctx.drawImage(this.glCanvas, 0, 0, w, h);
+        }
 
         const project3D = (wx, wy, wz) => {
             const px = wx * rx + wy * ry + wz * rz;
             const py = wx * ux + wy * uy + wz * uz;
-            const pz = wx * vx + wy * vy + wz * vz; // +pz = facing toward camera
+            const pz = wx * vx + wy * vy + wz * vz;
             return {
                 sx: cx + px * ballR,
                 sy: cy - py * ballR,
@@ -13090,27 +13311,7 @@ const AXIS_BALL_CONTROLLER = {
             };
         };
 
-        // 1. Outer 3D Sphere Rim & Equatorial Horizon Ring
-        ctx.save();
-        ctx.strokeStyle = 'rgba(0, 229, 255, 0.25)';
-        ctx.lineWidth = Math.max(1, w * 0.015);
-        ctx.beginPath();
-        ctx.arc(cx, cy, ballR, 0, Math.PI * 2);
-        ctx.stroke();
-
-        // Draw projected XZ horizon ring on the 3D ball
-        ctx.strokeStyle = 'rgba(147, 184, 222, 0.24)';
-        ctx.beginPath();
-        for (let i = 0; i <= 28; i++) {
-            const ang = (i / 28) * Math.PI * 2;
-            const p = project3D(Math.cos(ang), 0, Math.sin(ang));
-            if (i === 0) ctx.moveTo(p.sx, p.sy);
-            else ctx.lineTo(p.sx, p.sy);
-        }
-        ctx.stroke();
-        ctx.restore();
-
-        // 2. Define 3D Axis Nodes (+X East, -X West, +Y Top, +Z South, -Z North)
+        // Define 3D Axis Nodes (+X East, -X West, +Y Top, +Z South, -Z North)
         const rawNodes = [
             { id: 'e',   label: 'E',   wx:  1, wy:  0, wz:  0, color: '#ff4d6d', stem: true },
             { id: 'w',   label: 'W',   wx: -1, wy:  0, wz:  0, color: '#9f1239', stem: false },
@@ -13124,7 +13325,6 @@ const AXIS_BALL_CONTROLLER = {
             return { ...n, sx: p.sx, sy: p.sy, depth: p.depth };
         });
 
-        // Sort back-to-front by depth so front axis nodes cleanly occlude rear ones
         nodes.sort((a, b) => a.depth - b.depth);
         this.projectedNodes = nodes;
 
@@ -13133,18 +13333,18 @@ const AXIS_BALL_CONTROLLER = {
             const isFront = n.depth >= -0.05;
             const isHovered = this.hoveredNodeId === n.id;
 
-            // Axis stem from center to terminal cap
             ctx.save();
-            ctx.globalAlpha = isFront ? 0.95 : 0.42;
-            ctx.strokeStyle = n.color;
-            ctx.lineWidth = (n.stem ? 2.2 : 1.3) * scaleFactor;
-            ctx.beginPath();
-            ctx.moveTo(cx, cy);
-            ctx.lineTo(n.sx, n.sy);
-            ctx.stroke();
+            ctx.globalAlpha = isFront ? 0.96 : 0.48;
+            if (!this.glRenderer) {
+                ctx.strokeStyle = n.color;
+                ctx.lineWidth = (n.stem ? 2.2 : 1.3) * scaleFactor;
+                ctx.beginPath();
+                ctx.moveTo(cx, cy);
+                ctx.lineTo(n.sx, n.sy);
+                ctx.stroke();
+            }
 
-            // 3D Axis Cap Sphere
-            const nodeR = (isHovered ? 8.2 : (n.stem ? 6.8 : 5.4)) * scaleFactor;
+            const nodeR = (isHovered ? 8.2 : (n.stem ? 6.6 : 5.2)) * scaleFactor;
             ctx.beginPath();
             ctx.arc(n.sx, n.sy, nodeR, 0, Math.PI * 2);
             ctx.fillStyle = n.color;
@@ -13153,7 +13353,6 @@ const AXIS_BALL_CONTROLLER = {
             ctx.strokeStyle = isHovered ? '#ffffff' : '#040810';
             ctx.stroke();
 
-            // Axis Label inside Cap
             ctx.fillStyle = (n.id === 'top' || n.id === 's') ? '#030810' : '#ffffff';
             ctx.font = `900 ${Math.round(6.8 * scaleFactor)}px "JetBrains Mono", monospace`;
             ctx.textAlign = 'center';
@@ -13161,14 +13360,6 @@ const AXIS_BALL_CONTROLLER = {
             ctx.fillText(n.label, n.sx, n.sy + 0.5 * scaleFactor);
             ctx.restore();
         });
-
-        // Center Eye Pivot Dot
-        ctx.save();
-        ctx.fillStyle = '#e2f1ff';
-        ctx.beginPath();
-        ctx.arc(cx, cy, 2.4 * scaleFactor, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
     }
 };
 
@@ -13176,6 +13367,215 @@ window.AXIS_BALL_CONTROLLER = AXIS_BALL_CONTROLLER;
 window.setCameraAxisPerspective = function(viewId) {
     if (!AXIS_BALL_CONTROLLER.canvas) AXIS_BALL_CONTROLLER.init();
     AXIS_BALL_CONTROLLER.snapToPerspective(viewId);
+};
+
+// ============================================================================
+// REALISTIC 3D TANK TRACKS & DIRT DEFORMATION SYSTEM (POOLED INSTANCEDMESH)
+// Spawns two continuous parallel tread paths with repeated tread-link
+// impressions and displaced soil side berms behind moving tanks on dirt/soil/mud.
+// ============================================================================
+window.TANK_TRACK_SYSTEM = {
+    MAX_LINKS: 1024,
+    MAX_LIFE: 14.0,
+    mesh: null,
+    activeCount: 0,
+    writeCursor: 0,
+    slots: [],
+    _dummy: new THREE.Object3D(),
+    _normVec: new THREE.Vector3(),
+    _fwdVec: new THREE.Vector3(),
+    _rightVec: new THREE.Vector3(),
+    _rotMat: new THREE.Matrix4(),
+
+    init() {
+        if (this.mesh) return;
+        // Build a 3D tread-link geometry: sunken central compressed rut + two raised displaced dirt side edges
+        const geo = new THREE.BoxGeometry(0.42, 0.045, 0.22, 3, 1, 1);
+        const pos = geo.attributes.position;
+        const cols = new Float32Array(pos.count * 3);
+        for (let i = 0; i < pos.count; i++) {
+            const lx = pos.getX(i);
+            const ly = pos.getY(i);
+            const edgeFrac = Math.abs(lx) / 0.21;
+            if (edgeFrac > 0.65) {
+                // Raised displaced soil micro-berm on outer edges of the track
+                if (ly > 0) pos.setY(i, ly + 0.024);
+                cols[i * 3] = 0.28;
+                cols[i * 3 + 1] = 0.22;
+                cols[i * 3 + 2] = 0.16;
+            } else {
+                // Compressed dark earth tread groove in the center
+                if (ly > 0) pos.setY(i, ly * 0.35);
+                cols[i * 3] = 0.14;
+                cols[i * 3 + 1] = 0.11;
+                cols[i * 3 + 2] = 0.08;
+            }
+        }
+        geo.setAttribute('color', new THREE.BufferAttribute(cols, 3));
+        geo.computeVertexNormals();
+
+        const mat = new THREE.MeshStandardMaterial({
+            vertexColors: true,
+            roughness: 0.96,
+            metalness: 0.04,
+            polygonOffset: true,
+            polygonOffsetFactor: -2,
+            polygonOffsetUnits: -2
+        });
+
+        this.mesh = new THREE.InstancedMesh(geo, mat, this.MAX_LINKS);
+        this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        this.mesh.receiveShadow = true;
+        this.mesh.frustumCulled = false;
+
+        this.slots = new Array(this.MAX_LINKS);
+        const hiddenMat = new THREE.Matrix4().makeScale(0, 0, 0);
+        for (let i = 0; i < this.MAX_LINKS; i++) {
+            this.slots[i] = { active: false, age: 0, x: 0, y: -100, z: 0, quat: new THREE.Quaternion(), scaleX: 1, scaleZ: 1 };
+            this.mesh.setMatrixAt(i, hiddenMat);
+        }
+        this.mesh.instanceMatrix.needsUpdate = true;
+        scene.add(this.mesh);
+    },
+
+    clear() {
+        if (!this.mesh) return;
+        const hiddenMat = new THREE.Matrix4().makeScale(0, 0, 0);
+        for (let i = 0; i < this.MAX_LINKS; i++) {
+            this.slots[i].active = false;
+            this.mesh.setMatrixAt(i, hiddenMat);
+        }
+        this.mesh.instanceMatrix.needsUpdate = true;
+    },
+
+    isTrackableSurface(x, z) {
+        const biome = window.ACTIVE_PLANET_BIOME || 'highland';
+        if (biome === 'lava') return false;
+        if (typeof isOnRiverBridge === 'function' && isOnRiverBridge(x, z, 0.35)) return false;
+        if (typeof getSupplyRoadFactor === 'function' && getSupplyRoadFactor(x, z) > 0.32) return false;
+        const h = getTerrainHeight(x, z);
+        if (h < 0.06) return false;
+        if (biome === 'ocean' && h < 0.24) return false;
+        if (typeof isPointInWaterPond === 'function' && isPointInWaterPond(x, z, 0.35)) return false;
+        return true;
+    },
+
+    spawnTreadPair(wx, wz, dirX, dirZ, isHeavySiege) {
+        if (!this.mesh) this.init();
+        if (!this.isTrackableSurface(wx, wz)) return;
+
+        // Right vector perpendicular to tank heading in XZ
+        const rx = -dirZ;
+        const rz = dirX;
+        const halfTrackGauge = isHeavySiege ? 0.62 : 0.52;
+        const rearOffset = isHeavySiege ? -0.42 : -0.36;
+        const scaleW = isHeavySiege ? 1.18 : 1.0;
+
+        [-1, 1].forEach(sideSign => {
+            const tx = wx + dirX * rearOffset + rx * (sideSign * halfTrackGauge);
+            const tz = wz + dirZ * rearOffset + rz * (sideSign * halfTrackGauge);
+            if (!this.isTrackableSurface(tx, tz)) return;
+
+            const ty = getTerrainHeight(tx, tz) + 0.016;
+            if (typeof getTerrainNormalInto === 'function') {
+                getTerrainNormalInto(tx, tz, this._normVec);
+            } else {
+                this._normVec.set(0, 1, 0);
+            }
+
+            this._fwdVec.set(dirX, 0, dirZ).normalize();
+            this._rightVec.crossVectors(this._normVec, this._fwdVec).normalize();
+            this._fwdVec.crossVectors(this._rightVec, this._normVec).normalize();
+            this._rotMat.makeBasis(this._rightVec, this._normVec, this._fwdVec);
+
+            const idx = this.writeCursor;
+            this.writeCursor = (this.writeCursor + 1) % this.MAX_LINKS;
+            const slot = this.slots[idx];
+            slot.active = true;
+            slot.age = 0;
+            slot.x = tx;
+            slot.y = ty;
+            slot.z = tz;
+            slot.scaleX = scaleW;
+            slot.scaleZ = 1.0;
+            slot.quat.setFromRotationMatrix(this._rotMat);
+
+            this._dummy.position.set(tx, ty, tz);
+            this._dummy.quaternion.copy(slot.quat);
+            this._dummy.scale.set(scaleW, 1.0, 1.0);
+            this._dummy.updateMatrix();
+            this.mesh.setMatrixAt(idx, this._dummy.matrix);
+        });
+        this.mesh.instanceMatrix.needsUpdate = true;
+    },
+
+    update(dt) {
+        if (!this.mesh) this.init();
+
+        // 1. Emit new tread link pairs behind moving tanks (stopped when stationary or in siege mode)
+        for (let i = 0; i < units.length; i++) {
+            const u = units[i];
+            if (!u || u.hp <= 0 || !u.mesh) continue;
+            if (u.type !== 'tank' && u.type !== 'siege_tank') continue;
+            if (u.type === 'siege_tank' && u.siegeMode) {
+                u._lastTrackX = u.mesh.position.x;
+                u._lastTrackZ = u.mesh.position.z;
+                continue;
+            }
+            const cx = u.mesh.position.x;
+            const cz = u.mesh.position.z;
+            if (u._lastTrackX === undefined) {
+                u._lastTrackX = cx;
+                u._lastTrackZ = cz;
+                continue;
+            }
+            const dx = cx - u._lastTrackX;
+            const dz = cz - u._lastTrackZ;
+            const dist = Math.hypot(dx, dz);
+            const spacing = 0.34;
+            if (dist >= spacing) {
+                const dirX = dx / dist;
+                const dirZ = dz / dist;
+                const steps = Math.min(3, Math.floor(dist / spacing));
+                for (let s = 1; s <= steps; s++) {
+                    const px = u._lastTrackX + dirX * (s * spacing);
+                    const pz = u._lastTrackZ + dirZ * (s * spacing);
+                    this.spawnTreadPair(px, pz, dirX, dirZ, u.type === 'siege_tank');
+                }
+                u._lastTrackX = cx;
+                u._lastTrackZ = cz;
+            }
+        }
+
+        // 2. Age & naturally fade out older tank tracks
+        let dirty = false;
+        const fadeStart = this.MAX_LIFE - 3.5;
+        for (let i = 0; i < this.MAX_LINKS; i++) {
+            const slot = this.slots[i];
+            if (!slot.active) continue;
+            slot.age += dt;
+            if (slot.age >= this.MAX_LIFE) {
+                slot.active = false;
+                this._dummy.position.set(0, -100, 0);
+                this._dummy.scale.set(0, 0, 0);
+                this._dummy.updateMatrix();
+                this.mesh.setMatrixAt(i, this._dummy.matrix);
+                dirty = true;
+            } else if (slot.age >= fadeStart) {
+                const fadeT = (slot.age - fadeStart) / 3.5;
+                const s = Math.max(0.01, 1.0 - fadeT);
+                this._dummy.position.set(slot.x, slot.y - fadeT * 0.025, slot.z);
+                this._dummy.quaternion.copy(slot.quat);
+                this._dummy.scale.set(slot.scaleX * (0.75 + 0.25 * s), s, slot.scaleZ * s);
+                this._dummy.updateMatrix();
+                this.mesh.setMatrixAt(i, this._dummy.matrix);
+                dirty = true;
+            }
+        }
+        if (dirty) {
+            this.mesh.instanceMatrix.needsUpdate = true;
+        }
+    }
 };
 
 // ============================================================================
@@ -13191,7 +13591,6 @@ window.AMBIENT_AUDIO_ENGINE = {
         if (this.birdTimer <= 0) {
             this.birdTimer = 7.0 + Math.random() * 9.0;
             const weatherKey = (window.WEATHER_SYSTEM && window.WEATHER_SYSTEM.currentKey) || 'clear';
-            // Only play canyon hawk / songbird call in clear weather when camera is near ground/forests
             if (weatherKey === 'clear' && cam.position.y < 52 && window.SFX.ctx.state === 'running') {
                 try {
                     const ctx = window.SFX.ctx;
@@ -13218,8 +13617,8 @@ window.AMBIENT_AUDIO_ENGINE = {
 
 // ============================================================================
 // ZERG AI DEVELOPER DIAGNOSTIC & WATCHDOG TELEMETRY SYSTEM
-// Exposes real-time per-unit AI state, target, distance, navigation result,
-// movement/attack timestamps, cooldowns, recovery attempts, and errors.
+// Exposes real-time per-unit AI state, target, destination, movement speed,
+// distance to destination, navigation result, and reason for stopping.
 // ============================================================================
 window.ZERG_AI_DIAGNOSTICS = {
     getUnitReport(e) {
@@ -13237,8 +13636,14 @@ window.ZERG_AI_DIAGNOSTICS = {
             unitType: e.variant || 'skitterer',
             aiState: e.aiState || 'MOVING',
             currentTarget: targetDesc,
+            destination: e.currentDestination || null,
+            movementSpeed: typeof e.currentSpeed === 'number' ? e.currentSpeed : Number((e.speed || 0).toFixed(2)),
+            distanceToDestination: typeof e.distanceToDestination === 'number'
+                ? e.distanceToDestination
+                : (typeof e.currentTargetDist === 'number' ? Number(e.currentTargetDist.toFixed(2)) : null),
             targetDistance: typeof e.currentTargetDist === 'number' ? Number(e.currentTargetDist.toFixed(2)) : null,
             navigationResult: e.lastNavResult || 'pending',
+            stopReason: e.stopReason || (e.aiState === 'ATTACKING' ? 'in_attack_range' : 'none'),
             lastSuccessfulMovementTime: Number((e.lastMoveTime || 0).toFixed(2)),
             lastSuccessfulAttackTime: Number((e.lastAttackTime || 0).toFixed(2)),
             attackCooldown: Number(Math.max(0, e.cooldown || 0).toFixed(2)),

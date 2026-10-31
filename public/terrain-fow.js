@@ -569,10 +569,142 @@ function generateProceduralTopographyParameters(customSeed) {
     RIVER_COS = Math.cos(RIVER_ANGLE);
     RIVER_SIN = Math.sin(RIVER_ANGLE);
 
-    if (HAS_VALLEY_RIVER) {
+    window.OCEAN_ISLANDS = [];
+    window.LAVA_FISSURES = [];
+
+    if (ACTIVE_PLANET_BIOME === 'ocean') {
+        HAS_VALLEY_RIVER = true;
+        RIVER_HALF_WIDTH = 14.5;
+        RIVER_WATER_Y = -0.18;
+
+        // Multi-island archipelago: 4 major strategic islands + 5 surrounding satellite islands/atolls
+        const makeArchipelagoIsland = (id, x, z, rx, rz, rot, peakH, isMajor = false) => ({
+            id, x, z, rx, rz,
+            cosR: Math.cos(rot),
+            sinR: Math.sin(rot),
+            peakH,
+            isMajor,
+            lobePhase1: seededRandom() * Math.PI * 2,
+            lobePhase2: seededRandom() * Math.PI * 2,
+            coveAngle: seededRandom() * Math.PI * 2
+        });
+
+        const centralX = (seededRandom() - 0.5) * 6.0;
+        const centralZ = (seededRandom() - 0.5) * 6.0;
+        window.OCEAN_ISLANDS.push(
+            makeArchipelagoIsland('island_player', PLAYER_START_POS.x, PLAYER_START_POS.z, 32.0, 29.5, seededRandom() * Math.PI, 1.05, true),
+            makeArchipelagoIsland('island_enemy', ENEMY_BASE_POS.x, ENEMY_BASE_POS.z, 33.0, 30.0, seededRandom() * Math.PI, 0.95, true),
+            makeArchipelagoIsland('island_solaris', SOLARIS_BASE_POS.x, SOLARIS_BASE_POS.z, 26.5, 24.5, seededRandom() * Math.PI, 0.92, true),
+            makeArchipelagoIsland('island_central', centralX, centralZ, 24.5, 22.0, seededRandom() * Math.PI, 1.25, true)
+        );
+
+        const satCoords = [
+            [-58, -12, 18.5, 15.0, 1.15],
+            [58, 12, 18.5, 15.5, 1.10],
+            [-14, 58, 17.5, 14.5, 0.95],
+            [16, -58, 17.5, 14.5, 0.98],
+            [-54, -56, 16.0, 14.0, 0.88]
+        ];
+        satCoords.forEach(([sx, sz, srx, srz, sh], idx) => {
+            const jx = sx + (seededRandom() - 0.5) * 7.0;
+            const jz = sz + (seededRandom() - 0.5) * 7.0;
+            const clearMajor = window.OCEAN_ISLANDS.every(isl => Math.hypot(jx - isl.x, jz - isl.z) > (isl.rx + srx - 4.0));
+            if (clearMajor) {
+                window.OCEAN_ISLANDS.push(
+                    makeArchipelagoIsland(`island_sat_${idx + 1}`, jx, jz, srx, srz, seededRandom() * Math.PI, sh, false)
+                );
+            }
+        });
+
+        // Build 4 long Terran-engineered inter-island bridges spanning the ocean channels between islands
+        const createIslandBridgeLink = (islA, islB, bIdx, archType) => {
+            const dx = islB.x - islA.x;
+            const dz = islB.z - islA.z;
+            const dist = Math.hypot(dx, dz) || 1.0;
+            const dirX = dx / dist;
+            const dirZ = dz / dist;
+
+            const shoreA = Math.min(islA.rx, islA.rz) * 0.70;
+            const shoreB = Math.min(islB.rx, islB.rz) * 0.70;
+            const ax = islA.x + dirX * shoreA;
+            const az = islA.z + dirZ * shoreA;
+            const bx = islB.x - dirX * shoreB;
+            const bz = islB.z - dirZ * shoreB;
+
+            const cx = (ax + bx) * 0.5;
+            const cz = (az + bz) * 0.5;
+            const gapLen = Math.max(18.0, Math.hypot(bx - ax, bz - az));
+            const flatHalfSpan = gapLen * 0.5 + 1.8;
+            const rampReachU = flatHalfSpan + 4.8;
+            // bridgeLocalToWorld maps localU along (-sinYaw, cosYaw); set bridgeYaw so +localU points from B to A
+            const bridgeYaw = Math.atan2(dirX, -dirZ);
+            const cosYaw = Math.cos(bridgeYaw);
+            const sinYaw = Math.sin(bridgeYaw);
+            const bHalfW = 4.9;
+            const rcMid = getRiverCoords(cx, cz);
+
+            const rbObj = {
+                id: `bridge_${bIdx + 1}`,
+                index: bIdx,
+                isCustomIslandBridge: true,
+                sCoord: rcMid.s,
+                centerU: rcMid.u,
+                centerX: cx,
+                centerZ: cz,
+                yaw: bridgeYaw,
+                cosYaw,
+                sinYaw,
+                tangentSlope: 0,
+                halfWidth: bHalfW,
+                riverHalfW: flatHalfSpan - 1.0,
+                flatHalfSpan,
+                rampReachU,
+                archetype: archType,
+                hp: 1800,
+                maxHp: 1800,
+                destroyed: false
+            };
+            RIVER_BRIDGES.push(rbObj);
+
+            const sW = bridgeLocalToWorld(rbObj, 0, rampReachU);
+            const nW = bridgeLocalToWorld(rbObj, 0, -rampReachU);
+            const southEntryVec = new THREE.Vector3(sW.x, 0, sW.z);
+            southEntryVec.dirX = sinYaw;
+            southEntryVec.dirZ = cosYaw;
+            const northEntryVec = new THREE.Vector3(nW.x, 0, nW.z);
+            northEntryVec.dirX = -sinYaw;
+            northEntryVec.dirZ = -cosYaw;
+
+            BRIDGES.push({
+                id: rbObj.id,
+                sCoord: rbObj.sCoord,
+                halfWidth: bHalfW,
+                yaw: bridgeYaw,
+                archetype: archType,
+                center: new THREE.Vector3(cx, 0, cz),
+                southEntry: southEntryVec,
+                northEntry: northEntryVec,
+                bridgeRef: rbObj
+            });
+        };
+
+        const islPlayer = window.OCEAN_ISLANDS[0];
+        const islEnemy = window.OCEAN_ISLANDS[1];
+        const islSolaris = window.OCEAN_ISLANDS[2];
+        const islCentral = window.OCEAN_ISLANDS[3];
+        createIslandBridgeLink(islPlayer, islCentral, 0, 'truss_bridge');
+        createIslandBridgeLink(islCentral, islEnemy, 1, 'industrial_girder');
+        createIslandBridgeLink(islCentral, islSolaris, 2, 'concrete_causeway');
+        if (window.OCEAN_ISLANDS.length > 4) {
+            createIslandBridgeLink(islPlayer, window.OCEAN_ISLANDS[4], 3, 'truss_bridge');
+        }
+        BRIDGE_COUNT = RIVER_BRIDGES.length;
+    } else if (HAS_VALLEY_RIVER) {
         BRIDGE_COUNT = 2 + (seededRandom() > 0.45 ? 1 : 0);
         const spanSpread = BRIDGE_COUNT === 3 ? [-28.0, 0.0, 28.0] : [-20.0, 20.0];
-        const bridgeArchetypes = ['truss_bridge', 'concrete_causeway', 'industrial_girder'];
+        const bridgeArchetypes = ACTIVE_PLANET_BIOME === 'lava'
+            ? ['industrial_girder', 'truss_bridge', 'industrial_girder']
+            : ['truss_bridge', 'concrete_causeway', 'industrial_girder'];
 
         for (let b = 0; b < BRIDGE_COUNT; b++) {
             let sPos = spanSpread[b] + (seededRandom() - 0.5) * 8.5;
@@ -648,6 +780,38 @@ function generateProceduralTopographyParameters(customSeed) {
         }
     } else {
         BRIDGE_COUNT = 0;
+    }
+
+    if (ACTIVE_PLANET_BIOME === 'lava') {
+        // Generate large branching molten lava fissures and crevices across the volcanic caldera
+        const fissureDefs = [
+            { x: -38, z: 16, len: 26, wid: 2.8, ang: 0.42, curve: 0.18 },
+            { x: 36, z: -18, len: 28, wid: 3.1, ang: -0.55, curve: -0.22 },
+            { x: -16, z: -42, len: 24, wid: 2.6, ang: 1.15, curve: 0.16 },
+            { x: 22, z: 44, len: 25, wid: 2.9, ang: -1.05, curve: -0.19 },
+            { x: -52, z: -34, len: 22, wid: 2.5, ang: 0.78, curve: 0.14 },
+            { x: 54, z: 32, len: 22, wid: 2.6, ang: -0.72, curve: -0.15 }
+        ];
+        fissureDefs.forEach((fd, idx) => {
+            const fx = fd.x + (seededRandom() - 0.5) * 6.0;
+            const fz = fd.z + (seededRandom() - 0.5) * 6.0;
+            if (Math.hypot(fx - PLAYER_START_POS.x, fz - PLAYER_START_POS.z) > 28 &&
+                Math.hypot(fx - ENEMY_BASE_POS.x, fz - ENEMY_BASE_POS.z) > 28 &&
+                Math.hypot(fx - SOLARIS_BASE_POS.x, fz - SOLARIS_BASE_POS.z) > 24) {
+                const fang = fd.ang + (seededRandom() - 0.5) * 0.25;
+                window.LAVA_FISSURES.push({
+                    id: `lava_fissure_${idx + 1}`,
+                    x: fx,
+                    z: fz,
+                    len: fd.len,
+                    wid: fd.wid,
+                    ang: fang,
+                    cosA: Math.cos(fang),
+                    sinA: Math.sin(fang),
+                    curve: fd.curve
+                });
+            }
+        });
     }
 
     const enemyInwardAng = Math.atan2(-ENEMY_BASE_POS.z, -ENEMY_BASE_POS.x);
@@ -1065,6 +1229,43 @@ function computeRawTerrainHeight(x, z) {
         const karstSwale = Math.sin(x * 0.095 + MAP_SEED * 0.19) * Math.sin(z * 0.095 - MAP_SEED * 0.23) * 0.42;
         const hummock = Math.cos(x * 0.21 + z * 0.19 + MAP_SEED * 0.07) * 0.16;
         h = h * 0.90 + karstSwale + hummock;
+    } else if (biome === 'ocean' && window.OCEAN_ISLANDS && window.OCEAN_ISLANDS.length > 0) {
+        // Multi-Island Archipelago Topography: Deep ocean floor (-1.35m) rising via coral shoals & sandy beaches onto irregular islands
+        let bestIslandH = -1.35 + Math.sin(x * 0.06 + MAP_SEED) * Math.cos(z * 0.06) * 0.18;
+        for (let idx = 0; idx < window.OCEAN_ISLANDS.length; idx++) {
+            const isl = window.OCEAN_ISLANDS[idx];
+            const dx = x - isl.x;
+            const dz = z - isl.z;
+            const lx = dx * isl.cosR + dz * isl.sinR;
+            const lz = -dx * isl.sinR + dz * isl.cosR;
+            const ang = Math.atan2(lz, lx);
+            // Organic multi-lobe island coastline with natural coves, headlands & sandbars
+            const coastMod = 1.0
+                + 0.16 * Math.sin(ang * 3.0 + isl.lobePhase1)
+                + 0.11 * Math.cos(ang * 5.0 + isl.lobePhase2)
+                - 0.14 * Math.exp(-Math.pow(Math.atan2(Math.sin(ang - isl.coveAngle), Math.cos(ang - isl.coveAngle)) * 2.2, 2));
+            const normR = Math.hypot(lx / (isl.rx * coastMod), lz / (isl.rz * coastMod));
+            if (normR < 1.55) {
+                let islElev;
+                if (normR <= 0.72) {
+                    const inlandT = normR / 0.72;
+                    const inlandBell = 0.5 + 0.5 * Math.cos(inlandT * Math.PI);
+                    islElev = 0.28 + inlandBell * isl.peakH + h * 0.25;
+                } else if (normR <= 1.05) {
+                    // Gradual sandy beach transition from inland (0.28m) to waterline (-0.12m)
+                    const beachT = (normR - 0.72) / 0.33;
+                    const sBeach = beachT * beachT * (3.0 - 2.0 * beachT);
+                    islElev = THREE.MathUtils.lerp(0.28 + h * 0.10, -0.14, sBeach);
+                } else {
+                    // Shallow turquoise sandbar / reef dropoff into deep ocean channel
+                    const shoalT = (normR - 1.05) / 0.50;
+                    const sShoal = shoalT * shoalT * (3.0 - 2.0 * shoalT);
+                    islElev = THREE.MathUtils.lerp(-0.14, -1.35, sShoal);
+                }
+                if (islElev > bestIslandH) bestIslandH = islElev;
+            }
+        }
+        h = bestIslandH;
     }
 
     if (HAS_RAVINE_BRIDGES) {
@@ -1174,12 +1375,18 @@ function computeRawTerrainHeight(x, z) {
         }
     }
 
-    // Outer Mountain Rim & Out-of-Bounds Escarpment Wall (Clamps playable area at ±106m)
+    // Natural Horizon Transition at Map Perimeter (No artificial tall mountain wall cutting across the camera view!)
     const edgeDist = Math.max(Math.abs(x), Math.abs(z));
     if (edgeDist > 104) {
         const rimT = Math.min(1.0, (edgeDist - 104) / 14.0);
-        const smoothEscarpment = rimT * rimT * (3.0 - 2.0 * rimT);
-        h += smoothEscarpment * 9.5 + (edgeDist - 104) * 0.45 * (0.65 + 0.35 * Math.sin(x * 0.14 + MAP_SEED) * Math.cos(z * 0.14));
+        const smoothRim = rimT * rimT * (3.0 - 2.0 * rimT);
+        if (biome === 'ocean') {
+            h = THREE.MathUtils.lerp(h, -1.35, smoothRim);
+        } else {
+            const naturalRidgeWave = (0.45 + 0.55 * Math.sin(x * 0.09 + MAP_SEED) * Math.cos(z * 0.09 - MAP_SEED * 0.5))
+                                   + 0.35 * Math.sin(x * 0.04 - z * 0.05);
+            h += smoothRim * naturalRidgeWave * 0.95;
+        }
     }
 
     // 1. Dynamic Carved Valleys (Tactical sunken valley floor with flanked ridge shoulders)
@@ -1282,34 +1489,59 @@ function computeRawTerrainHeight(x, z) {
 
     // Valley River Channel & Variable-Width Riverbed Carving (Evaluated AFTER macro landforms & road grading so riverbed is never raised above water!)
     if (HAS_VALLEY_RIVER) {
-        const rc = getRiverCoords(x, z);
-        const riverDist = rc.dist;
-        const localHalfW = rc.halfWidth || RIVER_HALF_WIDTH;
-        const bankWidth = 3.25;
-        if (riverDist < localHalfW + bankWidth) {
-            if (riverDist <= localHalfW) {
-                const bedProfile = Math.cos((riverDist / localHalfW) * (Math.PI * 0.5));
-                const rawBedY = -0.36 - Math.pow(bedProfile, 1.15) * 0.62;
-                h = Math.min(h, rawBedY);
-            } else {
-                const bankT = (riverDist - localHalfW) / bankWidth;
-                const smoothBank = bankT * bankT * (3.0 - 2.0 * bankT);
-                h = THREE.MathUtils.lerp(-0.10, Math.max(0.16, h), smoothBank);
+        if (biome !== 'ocean') {
+            const rc = getRiverCoords(x, z);
+            const riverDist = rc.dist;
+            const localHalfW = rc.halfWidth || RIVER_HALF_WIDTH;
+            const bankWidth = 3.25;
+            if (riverDist < localHalfW + bankWidth) {
+                if (riverDist <= localHalfW) {
+                    const bedProfile = Math.cos((riverDist / localHalfW) * (Math.PI * 0.5));
+                    const rawBedY = -0.36 - Math.pow(bedProfile, 1.15) * 0.62;
+                    h = Math.min(h, rawBedY);
+                } else {
+                    const bankT = (riverDist - localHalfW) / bankWidth;
+                    const smoothBank = bankT * bankT * (3.0 - 2.0 * bankT);
+                    h = THREE.MathUtils.lerp(-0.10, Math.max(0.16, h), smoothBank);
+                }
             }
         }
-        // Grade bridge approach abutments on the riverbanks so road-to-bridge ramp transitions are 100% flush
+        // Grade bridge approach abutments on the banks/shorelines so terrain-to-bridge ramp transitions are 100% flush
         for (let bIdx = 0; bIdx < RIVER_BRIDGES.length; bIdx++) {
             const rb = RIVER_BRIDGES[bIdx];
             const bc = getBridgeLocalCoords(rb, x, z);
             const dU = Math.abs(bc.localU);
             const dS = Math.abs(bc.localS);
-            const effHalfW = rb.riverHalfW || RIVER_HALF_WIDTH;
-            if (dU > effHalfW + 0.35 && dU < effHalfW + 5.2 && dS < rb.halfWidth + 2.0) {
-                const uBlend = 1.0 - Math.abs((dU - (effHalfW + 2.6)) / 2.6);
-                const sBlend = dS <= rb.halfWidth ? 1.0 : Math.max(0.0, 1.0 - (dS - rb.halfWidth) / 2.0);
+            const effHalfW = rb.flatHalfSpan ? (rb.flatHalfSpan - 0.8) : (rb.riverHalfW || RIVER_HALF_WIDTH);
+            if (dU > effHalfW && dU < effHalfW + 6.0 && dS < rb.halfWidth + 2.4) {
+                const uBlend = 1.0 - Math.abs((dU - (effHalfW + 3.0)) / 3.0);
+                const sBlend = dS <= rb.halfWidth ? 1.0 : Math.max(0.0, 1.0 - (dS - rb.halfWidth) / 2.4);
                 const abutWeight = THREE.MathUtils.clamp(uBlend * sBlend, 0.0, 1.0);
                 if (abutWeight > 0.01) {
-                    h = THREE.MathUtils.lerp(h, 0.24, abutWeight * 0.78);
+                    h = THREE.MathUtils.lerp(h, 0.26, abutWeight * 0.85);
+                }
+            }
+        }
+    }
+
+    // Volcanic Lava Fissure Carving in 'lava' Biome
+    if (biome === 'lava' && window.LAVA_FISSURES && window.LAVA_FISSURES.length > 0) {
+        for (let fIdx = 0; fIdx < window.LAVA_FISSURES.length; fIdx++) {
+            const lf = window.LAVA_FISSURES[fIdx];
+            const dx = x - lf.x;
+            const dz = z - lf.z;
+            const along = dx * lf.cosA + dz * lf.sinA;
+            if (Math.abs(along) > lf.len) continue;
+            const bend = Math.sin((along / lf.len) * Math.PI) * lf.len * lf.curve;
+            const across = Math.abs((-dx * lf.sinA + dz * lf.cosA) - bend);
+            const localW = lf.wid * (1.0 - 0.55 * Math.pow(Math.abs(along) / lf.len, 1.6));
+            if (across < localW + 1.6) {
+                if (across <= localW) {
+                    const fProfile = Math.cos((across / Math.max(0.2, localW)) * (Math.PI * 0.5));
+                    h = Math.min(h, -0.24 - fProfile * 0.48);
+                } else {
+                    const rimT = (across - localW) / 1.6;
+                    h += Math.sin(rimT * Math.PI) * 0.28;
                 }
             }
         }
@@ -1695,34 +1927,42 @@ function isWalkableGround(x, z, unitRad = 0.0) {
         }
     }
 
-    // 2. River Bridge Deck & Approach Ramps: unconditionally walkable across the entire bridge deck & approach ramps!
-    if (HAS_VALLEY_RIVER) {
-        const rc = getRiverCoords(x, z);
+    // 2. River & Island Bridge Deck & Approach Ramps: unconditionally walkable across the entire bridge deck & approach ramps
+    // Uses exact bridgeLocalCoords(br, x, z) so skewed river bridges and long custom island bridges are 100% aligned!
+    if (RIVER_BRIDGES.length > 0) {
         for (let i = 0; i < RIVER_BRIDGES.length; i++) {
             const br = RIVER_BRIDGES[i];
-            const bCenterU = getRiverCenterUAtS(br.sCoord);
-            const dU = Math.abs(rc.u - bCenterU);
-            const dS = Math.abs(rc.s - br.sCoord);
+            if (br.destroyed) continue;
+            const bc = getBridgeLocalCoords(br, x, z);
+            const dU = Math.abs(bc.localU);
+            const dS = Math.abs(bc.localS);
+            const flatHalfSpan = br.flatHalfSpan || (RIVER_HALF_WIDTH + 1.05);
+            const rampReachU = br.rampReachU || (RIVER_HALF_WIDTH + 3.65);
             const safeHalfW = br.halfWidth - 0.22 - Math.min(0.18, unitRad * 0.20);
-            if (dU <= RIVER_HALF_WIDTH + 1.25) {
+            if (dU <= flatHalfSpan + 0.45) {
                 if (dS <= safeHalfW) return true;
                 if (dS > safeHalfW && dS < br.halfWidth + 0.45) return false;
-            } else if (dU <= RIVER_HALF_WIDTH + 10.5) {
-                const exitFlare = THREE.MathUtils.clamp((dU - (RIVER_HALF_WIDTH + 1.25)) * 0.75, 0.55, 4.2);
+            } else if (dU <= rampReachU + 6.5) {
+                const exitFlare = THREE.MathUtils.clamp((dU - flatHalfSpan) * 0.75, 0.55, 4.2);
                 if (dS <= br.halfWidth + exitFlare) return true;
             }
         }
-        if (rc.dist <= RIVER_HALF_WIDTH + 0.65) {
+    }
+    if (HAS_VALLEY_RIVER && ACTIVE_PLANET_BIOME !== 'ocean') {
+        const rc = getRiverCoords(x, z);
+        if (rc.dist <= (rc.halfWidth || RIVER_HALF_WIDTH) + 0.55) {
             return false;
         }
     }
 
     if (isOnBridgeCorridor(x, z)) return true;
     const h = getTerrainHeight(x, z);
+    if (ACTIVE_PLANET_BIOME === 'ocean' && h < -0.14) return false;
+    if (ACTIVE_PLANET_BIOME === 'lava' && h < -0.20) return false;
     if (h < -1.65 || h > 16.5) return false;
     if (typeof isPointInWaterPond === 'function' && isPointInWaterPond(x, z, Math.min(0.28, unitRad * 0.35))) return false;
-    // Zero-allocation normal Y check rejects steep canyon/mountain/ravine cliff faces (norm.y < 0.48)
-    if (getTerrainNormalY(x, z) < 0.48) return false;
+    // Zero-allocation normal Y check rejects steep canyon/mountain/ravine cliff faces (norm.y < 0.46)
+    if (getTerrainNormalY(x, z) < 0.46) return false;
     return true;
 }
 
@@ -2411,7 +2651,7 @@ function gatherStructureBlockers(selfRad, buildingsList, enemyBuildingsList) {
                 const eb = enemyBuildingsList[i];
                 if (!eb || eb.hp <= 0) continue;
                 const ebRad = eb.footprintRadius || (eb.role === 'citadel' ? 2.52 : (eb.role === 'spine_turret' ? 1.36 : 2.02));
-                const item = { x: eb.pos.x, z: eb.pos.z, rawR: ebRad, r: ebRad + 0.82, isBuilding: true, isBridgeBarrier: false, id: `eb_${i}` };
+                const item = { x: eb.pos.x, z: eb.pos.z, rawR: ebRad, r: ebRad + 0.42, isBuilding: true, isEnemyBuilding: true, isBridgeBarrier: false, id: `eb_${i}` };
                 rawList.push(item);
                 _insertCircleIntoSGrid(_structGridBuckets, item, item.x, item.z, ebRad + 3.2);
             }
@@ -2421,7 +2661,7 @@ function gatherStructureBlockers(selfRad, buildingsList, enemyBuildingsList) {
                 const sb = window.solarisBuildings[i];
                 if (!sb || sb.hp <= 0) continue;
                 const sbRad = sb.footprintRadius || 2.15;
-                const item = { x: sb.pos.x, z: sb.pos.z, rawR: sbRad, r: sbRad + 0.82, isBuilding: true, isBridgeBarrier: false, id: `sb_${i}` };
+                const item = { x: sb.pos.x, z: sb.pos.z, rawR: sbRad, r: sbRad + 0.42, isBuilding: true, isEnemyBuilding: true, isBridgeBarrier: false, id: `sb_${i}` };
                 rawList.push(item);
                 _insertCircleIntoSGrid(_structGridBuckets, item, item.x, item.z, sbRad + 3.2);
             }
@@ -2480,7 +2720,7 @@ function gatherStructureBlockers(selfRad, buildingsList, enemyBuildingsList) {
     const radAddOb = Math.min(0.42, selfRad * 0.72) + 0.12;
     for (let i = 0; i < _cachedBaseBlockers.length; i++) {
         const item = _cachedBaseBlockers[i];
-        item.r = item.rawR + (item.isBuilding ? radAddBld : radAddOb);
+        item.r = item.isEnemyBuilding ? (item.rawR * 0.58 + selfRad * 0.35) : (item.rawR + (item.isBuilding ? radAddBld : radAddOb));
     }
     return _cachedBaseBlockers;
 }
@@ -2496,9 +2736,11 @@ function isPointWalkableForUnitSize(wx, wz, selfRad, structCircles, targetPos = 
         if (dx > 10.5 || dx < -10.5) continue;
         const dz = wz - sc.z;
         if (dz > 10.5 || dz < -10.5) continue;
-        const effR = !sc.isBuilding
-            ? (sc.rawR + selfRad * 0.65 + 0.12)
-            : (sc.rawR + selfRad + 0.42);
+        const effR = sc.isEnemyBuilding
+            ? (sc.rawR * 0.55 + selfRad * 0.30)
+            : (!sc.isBuilding
+                ? (sc.rawR + selfRad * 0.65 + 0.12)
+                : (sc.rawR + selfRad + 0.42));
         if (!sc.isBridgeBarrier && !sc.isDynamicPond && targetPos) {
             const tdx = targetPos.x - sc.x;
             const tdz = targetPos.z - sc.z;
@@ -2646,7 +2888,8 @@ function computeAStarWalkablePath(startPos, goalPos, selfRad, structCircles, ext
             const wz = toWorld(nz);
             const gdx = wx - goalPos.x, gdz = wz - goalPos.z;
             const nearGoalOnSlope = (gdx * gdx + gdz * gdz < 7.84) && ((_astarStaticWalkable[nIdx] & 1) !== 0 || isWalkableGround(wx, wz, selfRad * 0.4));
-            if (nIdx !== goalIdx && !nearGoalOnSlope) {
+            const isStartStep = (curr === startIdx) && isWalkableGround(wx, wz, selfRad * 0.35);
+            if (nIdx !== goalIdx && !nearGoalOnSlope && !isStartStep) {
                 if ((_astarStaticWalkable[nIdx] & reqWalkMask) === 0) continue;
                 if (!isPointWalkableForUnitSize(wx, wz, selfRad, structCircles, goalPos)) continue;
             }
@@ -3942,13 +4185,19 @@ function computeDynamicRoadAndLandmarkLayout() {
         ];
     }
 
+    if (ACTIVE_PLANET_BIOME === 'lava' || ACTIVE_PLANET_BIOME === 'ocean') {
+        // Lava volcanic caldera & Ocean island archipelago do NOT have civilian asphalt road networks!
+        DYNAMIC_ROAD_SEGMENTS = [];
+        ROAD_JUNCTION_NODES = [];
+    }
+
     for (let i = 0; i < DYNAMIC_ROAD_SEGMENTS.length; i++) {
         precomputeRoadSegmentSamples(DYNAMIC_ROAD_SEGMENTS[i], 64);
     }
 
     // Bake O(1) Spatial Road Factor & Elevation Lookup Caches before activating terrain grading!
     bakeRoadSpatialLookupGrid();
-    _roadGradingActive = true;
+    _roadGradingActive = (DYNAMIC_ROAD_SEGMENTS.length > 0);
 
     // Plan and merge long tactical trench networks BEFORE baking terrain vertices so trenches are physically carved into the soil mesh!
     planTacticalTrenchesAndMergeNetwork();
@@ -5347,72 +5596,113 @@ function createValleyRiver() {
         addMapMesh(bankMesh);
     });
 
-    // 3. Variable-Width Meandering River Water / Molten Magma Plane with Shoreline Vertex Color Painting & Terrain-Welded Edges
-    const segsAlong = 136;
-    const segsAcross = 16;
-    const riverGeo = new THREE.PlaneGeometry(138, 1.0, segsAlong, segsAcross);
-    riverGeo.rotateX(-Math.PI / 2);
-    const rPos = riverGeo.attributes.position;
-    const rColors = new Float32Array(rPos.count * 3);
+    // 3. Variable-Width Meandering River Water / Molten Magma Plane OR Full Ocean Archipelago Sea Surface
+    const isOcean = (ACTIVE_PLANET_BIOME === 'ocean');
+    if (isOcean) {
+        const oceanGeo = new THREE.PlaneGeometry(240, 240, 140, 140);
+        oceanGeo.rotateX(-Math.PI / 2);
+        const oPos = oceanGeo.attributes.position;
+        const oColors = new Float32Array(oPos.count * 3);
+        const cDeepSea = new THREE.Color(0x06253a);
+        const cMidSea = new THREE.Color(0x0e4d6c);
+        const cTurquoise = new THREE.Color(0x1da2b8);
+        const cSurfFoam = new THREE.Color(0x88e2ec);
+        const cTmp = new THREE.Color();
 
-    const cWaterDeep = new THREE.Color(isLava ? 0xffb700 : 0x0c3144);
-    const cWaterMid = new THREE.Color(isLava ? 0xff4500 : 0x1d5c6d);
-    const cWaterShoal = new THREE.Color(isLava ? 0xb82200 : 0x366e72);
-    const cWaterShoreEdge = new THREE.Color(isLava ? 0x361108 : 0x4c473b);
-    const cVertWater = new THREE.Color();
+        for (let i = 0; i < oPos.count; i++) {
+            const wx = oPos.getX(i);
+            const wz = oPos.getZ(i);
+            const gh = getTerrainHeight(wx, wz);
+            const depth = Math.max(0.0, RIVER_WATER_Y - gh);
+            oPos.setY(i, RIVER_WATER_Y);
 
-    for (let i = 0; i < rPos.count; i++) {
-        const sCoord = rPos.getX(i);
-        const normZ = rPos.getZ(i) * 2.0; // [-1, 1] across river channel
-        const centerU = getRiverCenterUAtS(sCoord);
-        const localHalfW = getRiverHalfWidthAtS(sCoord) + 0.68;
-        const across = normZ * localHalfW;
-        const uCoord = centerU + across;
-        const wPt = riverCoordsToWorld(sCoord, uCoord);
-        const edgeFrac = Math.abs(normZ);
-
-        // Weld outer shoreline vertices smoothly into the sloped riverbank terrain so zero floating gaps can ever appear
-        const groundH = getTerrainHeight(wPt.x, wPt.z);
-        const meniscusDrop = Math.pow(edgeFrac, 2.6) * 0.032;
-        const edgeTerrainBlend = THREE.MathUtils.smoothstep(edgeFrac, 0.74, 1.0);
-        const targetEdgeY = Math.min(RIVER_WATER_Y + 0.008, groundH + 0.012);
-        const waterY = THREE.MathUtils.lerp(RIVER_WATER_Y - meniscusDrop, targetEdgeY, edgeTerrainBlend * 0.85);
-        rPos.setXYZ(i, wPt.x, waterY, wPt.z);
-
-        // Multi-stop vertex color gradient: deep thalweg -> mid channel -> shallow shoal -> canyon-floor-matched shoreline
-        sampleCanyonFloorColorAt(wPt.x, wPt.z, cCanyonSample);
-        const shoreTargetCol = cWaterShoreEdge.clone().lerp(cCanyonSample, 0.45);
-        if (edgeFrac < 0.45) {
-            cVertWater.copy(cWaterDeep).lerp(cWaterMid, edgeFrac / 0.45);
-        } else if (edgeFrac < 0.80) {
-            cVertWater.copy(cWaterMid).lerp(cWaterShoal, (edgeFrac - 0.45) / 0.35);
-        } else {
-            const tEdge = (edgeFrac - 0.80) / 0.20;
-            const sEdge = tEdge * tEdge * (3.0 - 2.0 * tEdge);
-            cVertWater.copy(cWaterShoal).lerp(shoreTargetCol, sEdge);
+            if (depth < 0.14) {
+                cTmp.copy(cSurfFoam).lerp(cTurquoise, depth / 0.14);
+            } else if (depth < 0.52) {
+                cTmp.copy(cTurquoise).lerp(cMidSea, (depth - 0.14) / 0.38);
+            } else {
+                const dT = Math.min(1.0, (depth - 0.52) / 0.85);
+                cTmp.copy(cMidSea).lerp(cDeepSea, dT);
+            }
+            oColors[i * 3] = cTmp.r;
+            oColors[i * 3 + 1] = cTmp.g;
+            oColors[i * 3 + 2] = cTmp.b;
         }
+        oceanGeo.setAttribute('color', new THREE.BufferAttribute(oColors, 3));
+        oceanGeo.computeVertexNormals();
+        const oceanMesh = new THREE.Mesh(oceanGeo, MAT.waterShader);
+        addMapMesh(oceanMesh);
+    } else {
+        const segsAlong = 136;
+        const segsAcross = 16;
+        const riverGeo = new THREE.PlaneGeometry(138, 1.0, segsAlong, segsAcross);
+        riverGeo.rotateX(-Math.PI / 2);
+        const rPos = riverGeo.attributes.position;
+        const rColors = new Float32Array(rPos.count * 3);
 
-        rColors[i * 3] = cVertWater.r;
-        rColors[i * 3 + 1] = cVertWater.g;
-        rColors[i * 3 + 2] = cVertWater.b;
+        const cWaterDeep = new THREE.Color(isLava ? 0xffc400 : 0x0c3144);
+        const cWaterMid = new THREE.Color(isLava ? 0xff4800 : 0x1d5c6d);
+        const cWaterShoal = new THREE.Color(isLava ? 0xb82000 : 0x366e72);
+        const cWaterShoreEdge = new THREE.Color(isLava ? 0x2c0d04 : 0x4c473b);
+        const cVertWater = new THREE.Color();
+
+        for (let i = 0; i < rPos.count; i++) {
+            const sCoord = rPos.getX(i);
+            const normZ = rPos.getZ(i) * 2.0; // [-1, 1] across river channel
+            const centerU = getRiverCenterUAtS(sCoord);
+            const localHalfW = getRiverHalfWidthAtS(sCoord) + 0.68;
+            const across = normZ * localHalfW;
+            const uCoord = centerU + across;
+            const wPt = riverCoordsToWorld(sCoord, uCoord);
+            const edgeFrac = Math.abs(normZ);
+
+            // Weld outer shoreline vertices smoothly into the sloped riverbank terrain so zero floating gaps can ever appear
+            const groundH = getTerrainHeight(wPt.x, wPt.z);
+            const meniscusDrop = Math.pow(edgeFrac, 2.6) * 0.032;
+            const edgeTerrainBlend = THREE.MathUtils.smoothstep(edgeFrac, 0.74, 1.0);
+            const targetEdgeY = Math.min(RIVER_WATER_Y + 0.008, groundH + 0.012);
+            const waterY = THREE.MathUtils.lerp(RIVER_WATER_Y - meniscusDrop, targetEdgeY, edgeTerrainBlend * 0.85);
+            rPos.setXYZ(i, wPt.x, waterY, wPt.z);
+
+            // Multi-stop vertex color gradient: deep thalweg -> mid channel -> shallow shoal -> canyon-floor-matched shoreline
+            sampleCanyonFloorColorAt(wPt.x, wPt.z, cCanyonSample);
+            const shoreTargetCol = cWaterShoreEdge.clone().lerp(cCanyonSample, 0.45);
+            if (edgeFrac < 0.45) {
+                cVertWater.copy(cWaterDeep).lerp(cWaterMid, edgeFrac / 0.45);
+            } else if (edgeFrac < 0.80) {
+                cVertWater.copy(cWaterMid).lerp(cWaterShoal, (edgeFrac - 0.45) / 0.35);
+            } else {
+                const tEdge = (edgeFrac - 0.80) / 0.20;
+                const sEdge = tEdge * tEdge * (3.0 - 2.0 * tEdge);
+                cVertWater.copy(cWaterShoal).lerp(shoreTargetCol, sEdge);
+            }
+
+            rColors[i * 3] = cVertWater.r;
+            rColors[i * 3 + 1] = cVertWater.g;
+            rColors[i * 3 + 2] = cVertWater.b;
+        }
+        riverGeo.setAttribute('color', new THREE.BufferAttribute(rColors, 3));
+        riverGeo.computeVertexNormals();
+        const riverMesh = new THREE.Mesh(riverGeo, isLava ? lavaFlowMat : MAT.waterShader);
+        addMapMesh(riverMesh);
     }
-    riverGeo.setAttribute('color', new THREE.BufferAttribute(rColors, 3));
-    riverGeo.computeVertexNormals();
-    const riverMesh = new THREE.Mesh(riverGeo, isLava ? lavaFlowMat : MAT.waterShader);
-    addMapMesh(riverMesh);
 
     const bridgeDeckMat = MAT.gunmetal || new THREE.MeshStandardMaterial({ color: 0x64748b, roughness: 0.45, metalness: 0.65 });
     const bridgePierMat = MAT.darkSteel || new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.7, metalness: 0.4 });
     const bridgeConcreteMat = concreteRuinMat || new THREE.MeshStandardMaterial({ color: 0x6b7280, roughness: 0.85, metalness: 0.15 });
     const bridgeGirderMat = rustedSteelMat || new THREE.MeshStandardMaterial({ color: 0x5a3826, roughness: 0.68, metalness: 0.65 });
     const bridgeHazardMat = MAT.hazard || bridgeDeckMat;
+    const lavaHeatShieldMat = new THREE.MeshStandardMaterial({ color: 0x1e1918, roughness: 0.52, metalness: 0.78 });
+    const lavaGlowStripMat = new THREE.MeshStandardMaterial({ color: 0xff5500, emissive: 0xff3b00, emissiveIntensity: 1.35, roughness: 0.35 });
 
     RIVER_BRIDGES.forEach((rb, bridgeIdx) => {
         const s0 = rb.sCoord;
         const centerU = (typeof rb.centerU === 'number') ? rb.centerU : getRiverCenterUAtS(s0);
-        const cWorld = riverCoordsToWorld(s0, centerU);
+        const cWorld = rb.isCustomIslandBridge
+            ? { x: rb.centerX, z: rb.centerZ }
+            : riverCoordsToWorld(s0, centerU);
 
-        // Ensure bridge orientation is 100% perpendicular to the local river tangent at s0
+        // Ensure bridge orientation is perpendicular to the local river tangent (or uses custom island bridge yaw)
         const localSlope = getRiverTangentSlopeAtS(s0);
         const localSkew = Math.atan(localSlope);
         const bridgeYaw = (typeof rb.yaw === 'number') ? rb.yaw : (RIVER_ANGLE - localSkew);
@@ -5428,7 +5718,9 @@ function createValleyRiver() {
         // Align 3D bridge mesh with the exact local perpendicular crossing frame (rb.yaw)
         bridgeGroup.rotation.y = bridgeYaw;
 
-        const archetype = rb.archetype || (bridgeIdx === 0 ? 'truss_bridge' : (bridgeIdx === 1 ? 'concrete_causeway' : 'industrial_girder'));
+        const archetype = isLava
+            ? 'industrial_girder'
+            : (rb.archetype || (bridgeIdx === 0 ? 'truss_bridge' : (bridgeIdx === 1 ? 'concrete_causeway' : 'industrial_girder')));
         rb.archetype = archetype;
         const bridgeWidth = rb.halfWidth * 2.0;
         const localRiverHW = getRiverHalfWidthAtS(s0);
@@ -5438,9 +5730,11 @@ function createValleyRiver() {
         rb.flatHalfSpan = flatHalfSpan;
         rb.rampReachU = rampReachU;
 
-        const primaryStructMat = archetype === 'concrete_causeway'
-            ? bridgeConcreteMat
-            : (archetype === 'industrial_girder' ? bridgeGirderMat : bridgeDeckMat);
+        const primaryStructMat = isLava
+            ? lavaHeatShieldMat
+            : (archetype === 'concrete_causeway'
+                ? bridgeConcreteMat
+                : (archetype === 'industrial_girder' ? bridgeGirderMat : bridgeDeckMat));
 
         // Intact center span group (hidden when bridge is destroyed in combat)
         const intactSpanGroup = new THREE.Group();
@@ -5454,8 +5748,8 @@ function createValleyRiver() {
         bridgeGroup.add(destroyedSpanGroup);
         rb.destroyedSpanGroup = destroyedSpanGroup;
 
-        // 1. Main Armored Roadway Deck Slab (top surface at y = 0.35)
-        const deckThickness = archetype === 'concrete_causeway' ? 0.30 : 0.22;
+        // 1. Main Armored Roadway / Industrial Grating Deck Slab (top surface at y = 0.35)
+        const deckThickness = archetype === 'concrete_causeway' ? 0.30 : 0.24;
         const mainDeck = new THREE.Mesh(
             createExtrudedArmorHullGeo(bridgeWidth, deckThickness, spanLength),
             primaryStructMat
@@ -5465,35 +5759,62 @@ function createValleyRiver() {
         mainDeck.receiveShadow = true;
         intactSpanGroup.add(mainDeck);
 
-        // Dark Asphalt Roadway Surface Inlay across the Bridge Deck so the road visually flows right across the bridge
         const roadInlayW = Math.min(bridgeWidth * 0.74, 5.2);
-        const deckAsphalt = new THREE.Mesh(
-            createExtrudedArmorHullGeo(roadInlayW, 0.022, spanLength + 0.10),
-            dynamicRoadAsphaltMat
-        );
-        deckAsphalt.position.set(0, 0.349, 0);
-        deckAsphalt.receiveShadow = true;
-        intactSpanGroup.add(deckAsphalt);
+        if (isLava) {
+            // Terran Industrial Lava Crossing Deck: Armored grate plates, heat-shield ribs & glowing hazard guide strips (no civilian asphalt!)
+            const deckPlate = new THREE.Mesh(
+                createExtrudedArmorHullGeo(roadInlayW, 0.024, spanLength + 0.10),
+                bridgePierMat
+            );
+            deckPlate.position.set(0, 0.349, 0);
+            deckPlate.receiveShadow = true;
+            intactSpanGroup.add(deckPlate);
 
-        // Continuous White Highway Edge Lines + Center Yellow Tactical Lane Divider Stripes on Bridge Deck
-        [-roadInlayW * 0.46, roadInlayW * 0.46].forEach(edgeX => {
-            const edgeLine = new THREE.Mesh(
-                createExtrudedArmorHullGeo(0.11, 0.024, spanLength + 0.06),
-                dynamicRoadEdgeLineMat
+            [-roadInlayW * 0.46, roadInlayW * 0.46].forEach(edgeX => {
+                const glowLine = new THREE.Mesh(
+                    createExtrudedArmorHullGeo(0.14, 0.028, spanLength + 0.06),
+                    lavaGlowStripMat
+                );
+                glowLine.position.set(edgeX, 0.362, 0);
+                intactSpanGroup.add(glowLine);
+            });
+            for (let zRib = -spanLength * 0.44; zRib <= spanLength * 0.44; zRib += 2.4) {
+                const crossRib = new THREE.Mesh(
+                    createExtrudedArmorHullGeo(roadInlayW * 0.88, 0.028, 0.28),
+                    bridgeHazardMat
+                );
+                crossRib.position.set(0, 0.363, zRib);
+                intactSpanGroup.add(crossRib);
+            }
+        } else {
+            // Dark Asphalt / Causeway Surface Inlay across the Bridge Deck
+            const deckAsphalt = new THREE.Mesh(
+                createExtrudedArmorHullGeo(roadInlayW, 0.022, spanLength + 0.10),
+                dynamicRoadAsphaltMat
             );
-            edgeLine.position.set(edgeX, 0.361, 0);
-            intactSpanGroup.add(edgeLine);
-        });
-        for (let zStripe = -spanLength * 0.42; zStripe <= spanLength * 0.42; zStripe += 2.2) {
-            const stripe = new THREE.Mesh(
-                createExtrudedArmorHullGeo(0.18, 0.026, 1.10),
-                dynamicRoadStripeMat
-            );
-            stripe.position.set(0, 0.363, zStripe);
-            intactSpanGroup.add(stripe);
+            deckAsphalt.position.set(0, 0.349, 0);
+            deckAsphalt.receiveShadow = true;
+            intactSpanGroup.add(deckAsphalt);
+
+            [-roadInlayW * 0.46, roadInlayW * 0.46].forEach(edgeX => {
+                const edgeLine = new THREE.Mesh(
+                    createExtrudedArmorHullGeo(0.11, 0.024, spanLength + 0.06),
+                    dynamicRoadEdgeLineMat
+                );
+                edgeLine.position.set(edgeX, 0.361, 0);
+                intactSpanGroup.add(edgeLine);
+            });
+            for (let zStripe = -spanLength * 0.42; zStripe <= spanLength * 0.42; zStripe += 2.2) {
+                const stripe = new THREE.Mesh(
+                    createExtrudedArmorHullGeo(0.18, 0.026, 1.10),
+                    dynamicRoadStripeMat
+                );
+                stripe.position.set(0, 0.363, zStripe);
+                intactSpanGroup.add(stripe);
+            }
         }
 
-        //Collapsed Span Wreckage Meshes (visible only when destroyed)
+        // Collapsed Span Wreckage Meshes (visible only when destroyed)
         [-1, 1].forEach(endSign => {
             const brokenSlab = new THREE.Mesh(
                 createExtrudedArmorHullGeo(bridgeWidth * 0.92, 0.22, spanLength * 0.36),
@@ -5593,28 +5914,31 @@ function createValleyRiver() {
             });
         });
 
-        // 3. Heavy Concrete & Steel Bridge Support Piers Extending All the Way Down to the Riverbed
+        // 3. Heavy Concrete & Steel Bridge Support Piers Extending All the Way Down to the Riverbed / Ocean Floor
+        const pierPositionsZ = spanLength > 26.0
+            ? [-spanLength * 0.36, -spanLength * 0.12, spanLength * 0.12, spanLength * 0.36]
+            : [-spanLength * 0.26, spanLength * 0.26];
         [-bridgeWidth * 0.38, bridgeWidth * 0.38].forEach(px => {
-            [-spanLength * 0.26, spanLength * 0.26].forEach(pz => {
+            pierPositionsZ.forEach(pz => {
                 const pierWPt = bridgeLocalToWorld(rb, px, pz);
-                const bedY = Math.min(-1.35, getTerrainHeight(pierWPt.x, pierWPt.z) - 0.25);
+                const bedY = Math.min(-1.45, getTerrainHeight(pierWPt.x, pierWPt.z) - 0.25);
                 const pierTopY = 0.26;
                 const pierH = Math.max(1.2, pierTopY - bedY);
                 const pierCenterY = bedY + pierH * 0.5;
 
                 const pier = new THREE.Mesh(
-                    createSculptedLatheBarrelGeo(0.34, 0.48, pierH, 10),
-                    archetype === 'concrete_causeway' ? bridgeConcreteMat : bridgePierMat
+                    createSculptedLatheBarrelGeo(0.36, 0.50, pierH, 10),
+                    isLava ? lavaHeatShieldMat : (archetype === 'concrete_causeway' ? bridgeConcreteMat : bridgePierMat)
                 );
                 pier.position.set(px, pierCenterY, pz);
                 pier.castShadow = !IS_MOBILE;
                 pier.receiveShadow = true;
                 bridgeGroup.add(pier);
 
-                // Underwater concrete footing pad seated into the riverbed
+                // Underwater / Lava-resistant footing pad seated into the bed
                 const footing = new THREE.Mesh(
-                    createSculptedLatheBarrelGeo(0.54, 0.66, 0.38, 10),
-                    bridgeConcreteMat
+                    createSculptedLatheBarrelGeo(0.56, 0.68, 0.40, 10),
+                    isLava ? lavaHeatShieldMat : bridgeConcreteMat
                 );
                 footing.position.set(px, bedY + 0.18, pz);
                 bridgeGroup.add(footing);
@@ -5622,10 +5946,10 @@ function createValleyRiver() {
         });
 
         // Cross-beam pier caps connecting left and right columns beneath the deck
-        [-spanLength * 0.26, spanLength * 0.26].forEach(pz => {
+        pierPositionsZ.forEach(pz => {
             const pierCap = new THREE.Mesh(
                 createExtrudedArmorHullGeo(bridgeWidth * 0.88, 0.26, 0.52),
-                bridgePierMat
+                isLava ? lavaHeatShieldMat : bridgePierMat
             );
             pierCap.position.set(0, 0.12, pz);
             bridgeGroup.add(pierCap);
@@ -9048,35 +9372,54 @@ function createOutOfBoundsFloorSkirt() {
         const clampedZ = THREE.MathUtils.clamp(vz, -halfMap + 0.25, halfMap - 0.25);
         const edgeH = getTerrainHeight(clampedX, clampedZ);
 
+        const biome = ACTIVE_PLANET_BIOME || 'highland';
         let vy;
         if (maxCoord < halfMap - 1.5) {
             // Keep interior skirt vertices safely tucked underneath the playable terrain mesh
             vy = edgeH - 4.5;
         } else {
             const outDist = Math.max(0.0, maxCoord - (halfMap - 1.5));
-            const smoothBlend = THREE.MathUtils.smoothstep(outDist, 0.0, 42.0);
-            const rollingHills = Math.sin(vx * 0.024 + MAP_SEED) * Math.cos(vz * 0.024) * 3.8
-                               + Math.sin(vx * 0.011 - vz * 0.013) * 5.2;
-            const gentleFalloff = -Math.min(6.5, outDist * 0.018);
-            const naturalHorizonH = edgeH * (1.0 - smoothBlend * 0.65) + (rollingHills + gentleFalloff) * smoothBlend;
-            vy = THREE.MathUtils.lerp(edgeH - 0.05, naturalHorizonH, Math.min(1.0, outDist / 4.5));
+            const smoothBlend = THREE.MathUtils.smoothstep(outDist, 0.0, 46.0);
+            if (biome === 'ocean') {
+                const oceanFloorWave = -1.45 + Math.sin(vx * 0.02 + MAP_SEED) * Math.cos(vz * 0.02) * 0.28;
+                vy = THREE.MathUtils.lerp(edgeH - 0.05, oceanFloorWave, Math.min(1.0, outDist / 8.0));
+            } else {
+                const rollingHills = Math.sin(vx * 0.022 + MAP_SEED) * Math.cos(vz * 0.022) * 1.65
+                                   + Math.sin(vx * 0.011 - vz * 0.013) * 2.15;
+                const gentleFalloff = -Math.min(3.8, outDist * 0.012);
+                const naturalHorizonH = edgeH * (1.0 - smoothBlend * 0.55) + (rollingHills + gentleFalloff) * smoothBlend;
+                vy = THREE.MathUtils.lerp(edgeH - 0.03, naturalHorizonH, Math.min(1.0, outDist / 5.5));
+            }
         }
         sPos.setY(i, vy);
 
-        // Natural meadow-to-badlands transition palette that blends into distance fog without artificial barriers
+        // Biome-matched horizon transition palette that blends naturally into distance fog without artificial walls
         const outDistColor = Math.max(0.0, maxCoord - halfMap);
-        const desertMix = THREE.MathUtils.smoothstep(outDistColor, 0.0, 55.0);
+        const distMix = THREE.MathUtils.smoothstep(outDistColor, 0.0, 58.0);
         const band = 0.5 + 0.5 * Math.sin(vy * 0.55 + vx * 0.018);
-        const shade = 0.28 + 0.08 * Math.sin(vx * 0.035) * Math.cos(vz * 0.035);
+        const shade = 0.26 + 0.07 * Math.sin(vx * 0.035) * Math.cos(vz * 0.035);
 
-        const edgeR = 0.26, edgeG = 0.35, edgeB = 0.22;
-        const badR = shade * (1.08 + band * 0.22);
-        const badG = shade * (0.88 + band * 0.14);
-        const badB = shade * (0.68 + band * 0.08);
+        let edgeR = 0.26, edgeG = 0.35, edgeB = 0.22;
+        let farR = shade * (1.08 + band * 0.22);
+        let farG = shade * (0.88 + band * 0.14);
+        let farB = shade * (0.68 + band * 0.08);
+        if (biome === 'lava') {
+            edgeR = 0.14; edgeG = 0.11; edgeB = 0.10;
+            farR = 0.18 + band * 0.08; farG = 0.10 + band * 0.04; farB = 0.09;
+        } else if (biome === 'ocean') {
+            edgeR = 0.05; edgeG = 0.22; edgeB = 0.32;
+            farR = 0.03; farG = 0.15; farB = 0.25;
+        } else if (biome === 'desert') {
+            edgeR = 0.54; edgeG = 0.42; edgeB = 0.28;
+            farR = 0.48 + band * 0.08; farG = 0.36 + band * 0.06; farB = 0.24;
+        } else if (biome === 'jungle') {
+            edgeR = 0.18; edgeG = 0.32; edgeB = 0.16;
+            farR = 0.14; farG = 0.26; farB = 0.13;
+        }
 
-        sColors[i * 3]     = THREE.MathUtils.lerp(edgeR, badR, desertMix);
-        sColors[i * 3 + 1] = THREE.MathUtils.lerp(edgeG, badG, desertMix);
-        sColors[i * 3 + 2] = THREE.MathUtils.lerp(edgeB, badB, desertMix);
+        sColors[i * 3]     = THREE.MathUtils.lerp(edgeR, farR, distMix);
+        sColors[i * 3 + 1] = THREE.MathUtils.lerp(edgeG, farG, distMix);
+        sColors[i * 3 + 2] = THREE.MathUtils.lerp(edgeB, farB, distMix);
     }
     skirtGeo.setAttribute('color', new THREE.BufferAttribute(sColors, 3));
     skirtGeo.computeVertexNormals();
@@ -10417,22 +10760,197 @@ function createDesertBiomeFeatures(isClearFn) {
 }
 
 function createLavaBiomeFeatures(isClearFn) {
-    const obsidianMat = new THREE.MeshStandardMaterial({ color: 0x1a1515, roughness: 0.42, metalness: 0.35 });
-    const basaltMat = new THREE.MeshStandardMaterial({ color: 0x2b2220, roughness: 0.88, metalness: 0.12 });
+    const obsidianMat = new THREE.MeshStandardMaterial({ color: 0x161212, roughness: 0.38, metalness: 0.42 });
+    const basaltMat = new THREE.MeshStandardMaterial({ color: 0x241c1a, roughness: 0.86, metalness: 0.16 });
+    const heatArmorMat = new THREE.MeshStandardMaterial({ color: 0x2c2826, roughness: 0.48, metalness: 0.76 });
+    const hazardMetalMat = MAT.hazard || new THREE.MeshStandardMaterial({ color: 0xd97706, roughness: 0.5, metalness: 0.5 });
+    const magmaCoreMat = new THREE.MeshStandardMaterial({
+        color: 0xff6a00,
+        emissive: 0xff3b00,
+        emissiveIntensity: 1.65,
+        roughness: 0.25
+    });
     const emberCrustMat = new THREE.MeshStandardMaterial({
         color: 0x3b1810,
-        emissive: 0xb82900,
-        emissiveIntensity: 0.65,
-        roughness: 0.75
+        emissive: 0xc83200,
+        emissiveIntensity: 0.85,
+        roughness: 0.72
+    });
+    const ashPlumeMat = new THREE.MeshStandardMaterial({
+        color: 0x262120,
+        emissive: 0x451204,
+        emissiveIntensity: 0.35,
+        transparent: true,
+        opacity: 0.58,
+        roughness: 0.95
     });
     const lavaGroup = new THREE.Group();
     lavaGroup.name = 'lavaBiomeFeatures';
 
-    // 1. Jagged Obsidian Monoliths, Basalt Columns & Glowing Volcanic Fumarole Vents
-    const spireCount = IS_MOBILE ? 24 : 44;
+    // 1. Render Flowing Molten Lava Surfaces inside all Carved Lava Fissures & Crevices
+    if (window.LAVA_FISSURES && window.LAVA_FISSURES.length > 0) {
+        window.LAVA_FISSURES.forEach(lf => {
+            const fGroup = new THREE.Group();
+            fGroup.position.set(lf.x, 0, lf.z);
+            fGroup.rotation.y = -lf.ang;
+
+            const segsL = 28;
+            const segsW = 6;
+            const fGeo = new THREE.PlaneGeometry(lf.len * 2.0, lf.wid * 2.1, segsL, segsW);
+            fGeo.rotateX(-Math.PI / 2);
+            const fPos = fGeo.attributes.position;
+            for (let i = 0; i < fPos.count; i++) {
+                const lx = fPos.getX(i);
+                const lz = fPos.getZ(i);
+                const normL = Math.abs(lx) / lf.len;
+                const taper = Math.max(0.15, 1.0 - 0.65 * Math.pow(normL, 1.5));
+                const bend = Math.sin((lx / lf.len) * Math.PI) * lf.len * lf.curve;
+                const finalZ = lz * taper + bend;
+                const wx = lf.x + lx * lf.cosA - finalZ * lf.sinA;
+                const wz = lf.z + lx * lf.sinA + finalZ * lf.cosA;
+                const gh = getTerrainHeight(wx, wz);
+                fPos.setXYZ(i, lx, Math.max(gh + 0.04, -0.22), finalZ);
+            }
+            fGeo.computeVertexNormals();
+            const fissureLavaMesh = new THREE.Mesh(fGeo, lavaFlowMat);
+            fGroup.add(fissureLavaMesh);
+
+            // Basalt rim boulders along fissure edges
+            for (let b = -3; b <= 3; b++) {
+                const along = (b / 3.5) * lf.len * 0.85;
+                const bend = Math.sin((along / lf.len) * Math.PI) * lf.len * lf.curve;
+                const side = (b % 2 === 0 ? 1 : -1) * (lf.wid * 0.95);
+                const rimRock = new THREE.Mesh(createSculptedOgiveSpireGeo(0.55 + Math.abs(b) * 0.08, 1.35, 6), b % 2 === 0 ? basaltMat : emberCrustMat);
+                rimRock.position.set(along, 0.25, bend + side);
+                rimRock.rotation.y = b * 0.9;
+                fGroup.add(rimRock);
+            }
+            lavaGroup.add(fGroup);
+        });
+    }
+
+    // 2. Specialized 3D Volcanic Industrial Structures on Stable Ground (Replacing Civilian Towns/Houses)
+    const buildVolcanicIndustrialStructure = (archetype, candX, candZ, rotY = 0) => {
+        if (!isClearFn(candX, candZ, 5.2)) return false;
+        const hCenter = getTerrainHeight(candX, candZ);
+        if (hCenter < 0.08 || hCenter > 3.5) return false;
+        if (typeof isInsideBasePlacementZone === 'function' && isInsideBasePlacementZone(candX, candZ, 18.0)) return false;
+        if (HAS_VALLEY_RIVER && getRiverDist(candX, candZ) < RIVER_HALF_WIDTH + 6.5) return false;
+
+        const sg = new THREE.Group();
+        const baseY = (typeof flattenTerrainUnderBuilding === 'function')
+            ? flattenTerrainUnderBuilding(candX, candZ, 3.8, 2.2)
+            : hCenter;
+        sg.position.set(candX, baseY, candZ);
+        sg.rotation.y = rotY;
+
+        // Heavy reinforced basalt & heat-shielded steel foundation plinth
+        const plinth = new THREE.Mesh(createExtrudedArmorHullGeo(6.2, 0.45, 6.2), basaltMat);
+        plinth.position.y = 0.22;
+        plinth.castShadow = !IS_MOBILE;
+        plinth.receiveShadow = true;
+        sg.add(plinth);
+
+        if (archetype === 'geothermal_extractor') {
+            // Terran Geothermal Extraction Facility: Deep magma bore-head, triple heat-exchanger towers & glowing magma conduit pipes
+            const coreHull = new THREE.Mesh(createExtrudedArmorHullGeo(3.8, 2.1, 3.8), heatArmorMat);
+            coreHull.position.y = 1.25;
+            coreHull.castShadow = !IS_MOBILE;
+            sg.add(coreHull);
+
+            const magmaWell = new THREE.Mesh(createSculptedLatheBarrelGeo(1.15, 1.35, 0.65, 12), emberCrustMat);
+            magmaWell.position.set(0, 0.55, 0);
+            const magmaPool = new THREE.Mesh(new THREE.CircleGeometry(0.95, 12), lavaFlowMat);
+            magmaPool.rotation.x = -Math.PI / 2;
+            magmaPool.position.y = 0.89;
+            sg.add(magmaWell, magmaPool);
+
+            [-1.55, 1.55].forEach(tx => {
+                [-1.55, 1.55].forEach(tz => {
+                    const tower = new THREE.Mesh(createSculptedLatheBarrelGeo(0.52, 0.68, 3.4, 10), heatArmorMat);
+                    tower.position.set(tx, 1.9, tz);
+                    tower.castShadow = !IS_MOBILE;
+                    const glowRing = new THREE.Mesh(createSculptedLatheBarrelGeo(0.56, 0.56, 0.28, 10), magmaCoreMat);
+                    glowRing.position.set(tx, 2.45, tz);
+                    const plume = new THREE.Mesh(createSculptedArmorDomeGeo(0.48, 8, 8), ashPlumeMat);
+                    plume.position.set(tx, 3.85, tz);
+                    sg.add(tower, glowRing, plume);
+                    animatedBiomeLandmarks.push({ type: 'lava_fountain', mesh: plume, phase: seededRandom() * Math.PI * 2 });
+                });
+            });
+        } else if (archetype === 'lava_power_generator') {
+            // Lava-Powered Energy Generator: Armored turbine hall + incandescent plasma-magma containment sphere & radiator fins
+            const turbineHall = new THREE.Mesh(createExtrudedArmorHullGeo(4.8, 1.85, 3.4), heatArmorMat);
+            turbineHall.position.set(0, 1.12, 0);
+            turbineHall.castShadow = !IS_MOBILE;
+            sg.add(turbineHall);
+
+            const containmentSphere = new THREE.Mesh(createSculptedArmorDomeGeo(1.25, 14, 12), magmaCoreMat);
+            containmentSphere.position.set(0, 2.35, 0);
+            sg.add(containmentSphere);
+            animatedBiomeLandmarks.push({ type: 'lava_fountain', mesh: containmentSphere, phase: seededRandom() * Math.PI * 2 });
+
+            for (let fin = 0; fin < 4; fin++) {
+                const fa = (fin / 4) * Math.PI * 2 + Math.PI * 0.25;
+                const radiator = new THREE.Mesh(createExtrudedArmorHullGeo(0.32, 2.4, 1.45), hazardMetalMat);
+                radiator.position.set(Math.cos(fa) * 1.85, 1.6, Math.sin(fa) * 1.85);
+                radiator.rotation.y = -fa;
+                sg.add(radiator);
+            }
+        } else if (archetype === 'mining_platform') {
+            // Industrial Mining Platform: Cantilevered slag crane, ore crusher hopper & molten slag vat
+            const deck = new THREE.Mesh(createExtrudedArmorHullGeo(5.4, 0.95, 4.6), heatArmorMat);
+            deck.position.y = 0.85;
+            deck.castShadow = !IS_MOBILE;
+            const gantry = new THREE.Mesh(createExtrudedArmorHullGeo(1.2, 3.2, 3.8), hazardMetalMat);
+            gantry.position.set(-1.4, 2.4, 0);
+            const slagVat = new THREE.Mesh(createSculptedLatheBarrelGeo(1.1, 1.25, 1.1, 10), obsidianMat);
+            slagVat.position.set(1.25, 1.35, 0);
+            const slagTop = new THREE.Mesh(new THREE.CircleGeometry(0.95, 10), lavaFlowMat);
+            slagTop.rotation.x = -Math.PI / 2;
+            slagTop.position.set(1.25, 1.92, 0);
+            sg.add(deck, gantry, slagVat, slagTop);
+        } else {
+            // Heavy Reinforced Volcanic Outpost Bastion: Heat-shielded command bunker, sensor mast & thermal vents
+            const bunker = new THREE.Mesh(createExtrudedArmorHullGeo(4.6, 1.95, 4.6), heatArmorMat);
+            bunker.position.y = 1.15;
+            bunker.castShadow = !IS_MOBILE;
+            const roofDome = new THREE.Mesh(createSculptedArmorDomeGeo(1.35, 10, 8), obsidianMat);
+            roofDome.position.y = 2.15;
+            const beacon = new THREE.Mesh(createSculptedArmorDomeGeo(0.24, 8, 8), magmaCoreMat);
+            beacon.position.set(0, 2.95, 0);
+            sg.add(bunker, roofDome, beacon);
+        }
+
+        lavaGroup.add(sg);
+        REGISTERED_MAP_STRUCTURES.push({ x: candX, z: candZ, r: 3.8, type: archetype });
+        obstacles.push({ x: candX, z: candZ, r: 3.25, type: 'unique_building' });
+        return true;
+    };
+
+    const structureCandidates = [
+        ['geothermal_extractor', -32, 26],
+        ['geothermal_extractor', 34, -24],
+        ['lava_power_generator', -44, -18],
+        ['lava_power_generator', 46, 20],
+        ['mining_platform', -18, 46],
+        ['mining_platform', 20, -46],
+        ['volcanic_outpost', -52, 42],
+        ['volcanic_outpost', 52, -40],
+        ['geothermal_extractor', 0, 32],
+        ['lava_power_generator', 0, -32]
+    ];
+    structureCandidates.forEach(([arch, cx, cz], idx) => {
+        const jx = cx + (seededRandom() - 0.5) * 8.0;
+        const jz = cz + (seededRandom() - 0.5) * 8.0;
+        buildVolcanicIndustrialStructure(arch, jx, jz, idx * 0.85);
+    });
+
+    // 3. Jagged Obsidian Monoliths, Basalt Columns & Glowing Volcanic Fumarole Vents with Smoke/Ash Plumes
+    const spireCount = IS_MOBILE ? 28 : 52;
     for (let i = 0; i < spireCount; i++) {
-        const lx = (seededRandom() - 0.5) * 134;
-        const lz = (seededRandom() - 0.5) * 134;
+        const lx = (seededRandom() - 0.5) * 144;
+        const lz = (seededRandom() - 0.5) * 144;
         if (!isClearFn(lx, lz, 2.4)) continue;
         const ly = getTerrainHeight(lx, lz);
         if (ly < -0.15) continue;
@@ -10441,27 +10959,29 @@ function createLavaBiomeFeatures(isClearFn) {
         formation.position.set(lx, ly, lz);
 
         if (i % 3 === 0) {
-            // Active Volcanic Fumarole Cone with Glowing Magma Throat & Animated Lava Plume
-            const cone = new THREE.Mesh(createSculptedLatheBarrelGeo(0.55, 1.35, 1.45, 9), basaltMat);
-            cone.position.y = 0.65;
+            // Active Volcanic Fumarole Cone with Glowing Magma Throat, Rising Smoke Plume & Animated Lava Fountain
+            const cone = new THREE.Mesh(createSculptedLatheBarrelGeo(0.58, 1.45, 1.55, 9), basaltMat);
+            cone.position.y = 0.68;
             cone.castShadow = !IS_MOBILE;
-            const throat = new THREE.Mesh(new THREE.CircleGeometry(0.48, 10), lavaFlowMat);
+            const throat = new THREE.Mesh(new THREE.CircleGeometry(0.50, 10), lavaFlowMat);
             throat.rotation.x = -Math.PI / 2;
-            throat.position.y = 1.39;
-            const fountain = new THREE.Mesh(createSculptedArmorDomeGeo(0.36, 8, 8), lavaFlowMat);
-            fountain.position.y = 1.42;
-            formation.add(cone, throat, fountain);
+            throat.position.y = 1.46;
+            const fountain = new THREE.Mesh(createSculptedArmorDomeGeo(0.38, 8, 8), lavaFlowMat);
+            fountain.position.y = 1.50;
+            const smokePuff = new THREE.Mesh(createSculptedArmorDomeGeo(0.62, 8, 8), ashPlumeMat);
+            smokePuff.position.y = 2.35;
+            formation.add(cone, throat, fountain, smokePuff);
             animatedBiomeLandmarks.push({ type: 'lava_fountain', mesh: fountain, phase: seededRandom() * Math.PI * 2 });
             obstacles.push({ x: lx, z: lz, r: 1.35, type: 'rock' });
         } else {
             // Cluster of Hexagonal Basalt Columns & Sharp Obsidian Shards
-            const shards = 3 + Math.floor(seededRandom() * 3);
+            const shards = 3 + Math.floor(seededRandom() * 4);
             for (let s = 0; s < shards; s++) {
                 const ang = (s / shards) * Math.PI * 2 + seededRandom() * 0.4;
-                const d = s === 0 ? 0 : (0.35 + seededRandom() * 0.45);
-                const h = (s === 0 ? 1.8 : 1.0) + seededRandom() * 1.1;
+                const d = s === 0 ? 0 : (0.35 + seededRandom() * 0.50);
+                const h = (s === 0 ? 2.0 : 1.1) + seededRandom() * 1.2;
                 const shard = new THREE.Mesh(
-                    createSculptedOgiveSpireGeo(0.32 + seededRandom() * 0.22, h, 6),
+                    createSculptedOgiveSpireGeo(0.34 + seededRandom() * 0.24, h, 6),
                     s % 2 === 0 ? obsidianMat : emberCrustMat
                 );
                 shard.position.set(Math.cos(ang) * d, h * 0.42, Math.sin(ang) * d);
@@ -10474,31 +10994,61 @@ function createLavaBiomeFeatures(isClearFn) {
         lavaGroup.add(formation);
     }
 
-    // 2. Charred Carbonized Tree Skeletons & Glowing Magma Surface Fissures
-    const snagCount = IS_MOBILE ? 20 : 36;
-    for (let i = 0; i < snagCount; i++) {
-        const sx = (seededRandom() - 0.5) * 130;
-        const sz = (seededRandom() - 0.5) * 130;
+    // 4. Incandescent Surface Magma Cracks & Volcanic Embers (No normal green trees!)
+    const crackCount = IS_MOBILE ? 24 : 44;
+    for (let i = 0; i < crackCount; i++) {
+        const sx = (seededRandom() - 0.5) * 138;
+        const sz = (seededRandom() - 0.5) * 138;
         if (!isClearFn(sx, sz, 2.0)) continue;
         const sy = getTerrainHeight(sx, sz);
         if (sy < 0.05 || sy > 3.2) continue;
 
-        if (i % 2 === 0 && typeof createMultiSpeciesTreeMesh === 'function') {
-            createMultiSpeciesTreeMesh('snag', sx, sz);
-        } else {
-            // Incandescent Surface Magma Crack Ribbon
-            const crackGroup = new THREE.Group();
-            crackGroup.position.set(sx, sy + 0.025, sz);
-            crackGroup.rotation.y = seededRandom() * Math.PI * 2;
-            const len = 2.2 + seededRandom() * 2.4;
-            const crack = new THREE.Mesh(new THREE.PlaneGeometry(len, 0.34, 6, 1), lavaFlowMat);
-            crack.rotation.x = -Math.PI / 2;
-            crackGroup.add(crack);
-            lavaGroup.add(crackGroup);
-        }
+        const crackGroup = new THREE.Group();
+        crackGroup.position.set(sx, sy + 0.028, sz);
+        crackGroup.rotation.y = seededRandom() * Math.PI * 2;
+        const len = 2.6 + seededRandom() * 3.2;
+        const crack = new THREE.Mesh(new THREE.PlaneGeometry(len, 0.42, 6, 1), lavaFlowMat);
+        crack.rotation.x = -Math.PI / 2;
+        crackGroup.add(crack);
+        lavaGroup.add(crackGroup);
     }
 
     addMapMesh(lavaGroup);
+}
+
+function createOceanBiomeFeatures(isClearFn) {
+    const oceanGroup = new THREE.Group();
+    oceanGroup.name = 'oceanBiomeFeatures';
+    const limestoneMat = new THREE.MeshStandardMaterial({ color: 0x8b8578, roughness: 0.85, metalness: 0.08 });
+    const coralMat = new THREE.MeshStandardMaterial({ color: 0xd97757, roughness: 0.75, metalness: 0.10 });
+
+    // Scatter tropical palm trees, coastal limestone stacks & island boulders across the archipelago islands
+    const propCount = IS_MOBILE ? 48 : 88;
+    for (let i = 0; i < propCount; i++) {
+        const px = (seededRandom() - 0.5) * 156;
+        const pz = (seededRandom() - 0.5) * 156;
+        if (!isClearFn(px, pz, 2.2)) continue;
+        const py = getTerrainHeight(px, pz);
+        if (py < -0.02 || py > 3.2) continue;
+
+        if (py >= 0.06 && typeof createMultiSpeciesTreeMesh === 'function' && seededRandom() > 0.28) {
+            createMultiSpeciesTreeMesh('palm', px, pz);
+        } else {
+            const stack = new THREE.Group();
+            stack.position.set(px, py, pz);
+            const rMesh = new THREE.Mesh(
+                createOrganicBoulderGeo(0.75 + seededRandom() * 0.65, 1),
+                i % 3 === 0 ? coralMat : limestoneMat
+            );
+            rMesh.scale.set(1.2, 0.85 + seededRandom() * 0.6, 1.1);
+            rMesh.castShadow = !IS_MOBILE;
+            stack.add(rMesh);
+            oceanGroup.add(stack);
+            obstacles.push({ x: px, z: pz, r: 0.95, type: 'rock' });
+        }
+    }
+
+    addMapMesh(oceanGroup);
 }
 
 function createDenseJungleBiomeFeatures(isClearFn) {
@@ -10712,144 +11262,157 @@ function populateDynamicWorldPropsAndLandmarks() {
         createMineGemCraterSite(gx, gz, isEmpty, gIdx);
     });
 
-    // 3. Algorithmic Supply Roads & Collector Junction Aprons + Roadblocks & Car Pileups!
-    createRoadJunctionAprons();
-    DYNAMIC_ROAD_SEGMENTS.forEach(seg => createDynamicMorphingRoadRibbon(seg, IS_MOBILE ? 44 : 60));
-    createRoadAbandonedCarsAndPileups();
-
-    // 4. Spawn Major Non-Overlapping Settlements, Towns, Military Command Buildings, Cargo Yards, Minivan Houses & Evacuation Camps BEFORE Trees/Rocks!
-    const airbaseX = -ABANDONED_TOWN_CENTER.x * 0.85 + (seededRandom() - 0.5) * 14;
-    const airbaseZ = ABANDONED_TOWN_CENTER.z * 0.75 + (seededRandom() - 0.5) * 14;
-    createDestroyedRunwayAirbase(airbaseX, airbaseZ, (seededRandom() - 0.5) * 0.8 + 0.35);
-
-    ABANDONED_BASES.forEach((ab, idx) => createAbandonedMilitaryBase(ab.x, ab.z, ab.rot, idx));
-    const town1X = ABANDONED_TOWN_CENTER.x + (seededRandom() - 0.5) * 4;
-    const town1Z = ABANDONED_TOWN_CENTER.z + (seededRandom() - 0.5) * 3;
-    createAbandonedTown(town1X, town1Z);
-
-    const secondTownX = THREE.MathUtils.clamp(-ABANDONED_TOWN_CENTER.x * 0.72 + (seededRandom() - 0.5) * 12, -62, 62);
-    const secondTownZ = THREE.MathUtils.clamp(-ABANDONED_TOWN_CENTER.z * 0.68 + (seededRandom() - 0.5) * 12, -62, 62);
-    createAbandonedTown(secondTownX, secondTownZ);
-
+    const biome = ACTIVE_PLANET_BIOME || 'highland';
+    const isLavaBiome = (biome === 'lava');
+    const isOceanBiome = (biome === 'ocean');
     const randCoord = (spread = 110) => (seededRandom() - 0.5) * spread;
-    const dirtPathHubs = [
-        { x: town1X, z: town1Z },
-        { x: secondTownX, z: secondTownZ },
-        { x: SOUTH_ROAD_HUB.x, z: SOUTH_ROAD_HUB.z },
-        { x: NORTH_ROAD_HUB.x, z: NORTH_ROAD_HUB.z }
-    ];
-    const connectToNearestHubWithDirtPath = (pt, width = 2.5) => {
-        if (!pt) return;
-        let bestHub = dirtPathHubs[0];
-        let bestDist = Infinity;
-        for (let i = 0; i < dirtPathHubs.length; i++) {
-            const d = Math.hypot(pt.x - dirtPathHubs[i].x, pt.z - dirtPathHubs[i].z);
-            if (d > 7.0 && d < bestDist) {
-                bestDist = d;
-                bestHub = dirtPathHubs[i];
+
+    if (!isLavaBiome && !isOceanBiome) {
+        // 3. Algorithmic Supply Roads & Collector Junction Aprons + Roadblocks & Car Pileups!
+        createRoadJunctionAprons();
+        DYNAMIC_ROAD_SEGMENTS.forEach(seg => createDynamicMorphingRoadRibbon(seg, IS_MOBILE ? 44 : 60));
+        createRoadAbandonedCarsAndPileups();
+
+        // 4. Spawn Major Non-Overlapping Settlements, Towns, Military Command Buildings, Cargo Yards, Minivan Houses & Evacuation Camps BEFORE Trees/Rocks!
+        const airbaseX = -ABANDONED_TOWN_CENTER.x * 0.85 + (seededRandom() - 0.5) * 14;
+        const airbaseZ = ABANDONED_TOWN_CENTER.z * 0.75 + (seededRandom() - 0.5) * 14;
+        createDestroyedRunwayAirbase(airbaseX, airbaseZ, (seededRandom() - 0.5) * 0.8 + 0.35);
+
+        ABANDONED_BASES.forEach((ab, idx) => createAbandonedMilitaryBase(ab.x, ab.z, ab.rot, idx));
+        const town1X = ABANDONED_TOWN_CENTER.x + (seededRandom() - 0.5) * 4;
+        const town1Z = ABANDONED_TOWN_CENTER.z + (seededRandom() - 0.5) * 3;
+        createAbandonedTown(town1X, town1Z);
+
+        const secondTownX = THREE.MathUtils.clamp(-ABANDONED_TOWN_CENTER.x * 0.72 + (seededRandom() - 0.5) * 12, -62, 62);
+        const secondTownZ = THREE.MathUtils.clamp(-ABANDONED_TOWN_CENTER.z * 0.68 + (seededRandom() - 0.5) * 12, -62, 62);
+        createAbandonedTown(secondTownX, secondTownZ);
+
+        const dirtPathHubs = [
+            { x: town1X, z: town1Z },
+            { x: secondTownX, z: secondTownZ },
+            { x: SOUTH_ROAD_HUB.x, z: SOUTH_ROAD_HUB.z },
+            { x: NORTH_ROAD_HUB.x, z: NORTH_ROAD_HUB.z }
+        ];
+        const connectToNearestHubWithDirtPath = (pt, width = 2.5) => {
+            if (!pt) return;
+            let bestHub = dirtPathHubs[0];
+            let bestDist = Infinity;
+            for (let i = 0; i < dirtPathHubs.length; i++) {
+                const d = Math.hypot(pt.x - dirtPathHubs[i].x, pt.z - dirtPathHubs[i].z);
+                if (d > 7.0 && d < bestDist) {
+                    bestDist = d;
+                    bestHub = dirtPathHubs[i];
+                }
             }
+            if (bestHub && bestDist < 58.0) {
+                createDynamicDirtPathwayRibbon(pt.x, pt.z, bestHub.x, bestHub.z, width);
+            }
+            dirtPathHubs.push(pt);
+        };
+
+        // Connect secondary town to road network via a wide dirt pathway
+        connectToNearestHubWithDirtPath({ x: secondTownX, z: secondTownZ }, 3.2);
+
+        // Spawn Dynamic Reinforced Military Command Buildings
+        for (let mb = 0; mb < 3; mb++) {
+            const mPt = createDynamicMilitaryCommandBuilding(randCoord(106), randCoord(106), (seededRandom() - 0.5) * Math.PI * 2);
+            connectToNearestHubWithDirtPath(mPt, 2.8);
         }
-        if (bestHub && bestDist < 58.0) {
-            createDynamicDirtPathwayRibbon(pt.x, pt.z, bestHub.x, bestHub.z, width);
+
+        // Spawn Dynamic Cargo Container Depot Yards
+        for (let cg = 0; cg < 3; cg++) {
+            const cPt = createDynamicCargoDepotYard(randCoord(108), randCoord(108), (seededRandom() - 0.5) * Math.PI * 2);
+            connectToNearestHubWithDirtPath(cPt, 2.8);
         }
-        dirtPathHubs.push(pt);
-    };
 
-    // Connect secondary town to road network via a wide dirt pathway
-    connectToNearestHubWithDirtPath({ x: secondTownX, z: secondTownZ }, 3.2);
+        // Spawn Dynamic Emergency Evacuation & Medical Relief Camps
+        for (let ev = 0; ev < 3; ev++) {
+            const ePt = createDynamicEvacuationCamp(randCoord(106), randCoord(106), (seededRandom() - 0.5) * Math.PI * 2);
+            connectToNearestHubWithDirtPath(ePt, 2.6);
+        }
 
-    // Spawn Dynamic Reinforced Military Command Buildings
-    for (let mb = 0; mb < 3; mb++) {
-        const mPt = createDynamicMilitaryCommandBuilding(randCoord(106), randCoord(106), (seededRandom() - 0.5) * Math.PI * 2);
-        connectToNearestHubWithDirtPath(mPt, 2.8);
-    }
+        // Spawn Dynamic Suburban Frontier Houses with Parked 3D Minivans
+        for (let mv = 0; mv < 14; mv++) {
+            const mx = (mv < 5)
+                ? (town1X + (seededRandom() - 0.5) * 42)
+                : (mv < 10 ? (secondTownX + (seededRandom() - 0.5) * 42) : randCoord(112));
+            const mz = (mv < 5)
+                ? (town1Z + (seededRandom() - 0.5) * 38)
+                : (mv < 10 ? (secondTownZ + (seededRandom() - 0.5) * 38) : randCoord(112));
+            const mvPt = createMinivanSuburbanHouse(mx, mz, (seededRandom() - 0.5) * Math.PI * 2, mv);
+            if (mv < 6) connectToNearestHubWithDirtPath(mvPt, 2.2);
+        }
 
-    // Spawn Dynamic Cargo Container Depot Yards
-    for (let cg = 0; cg < 3; cg++) {
-        const cPt = createDynamicCargoDepotYard(randCoord(108), randCoord(108), (seededRandom() - 0.5) * Math.PI * 2);
-        connectToNearestHubWithDirtPath(cPt, 2.8);
-    }
+        // Spawn Dynamic Rig Stations, Electric Stations & Gas Stations connected to the road/dirt network
+        for (let rs = 0; rs < 3; rs++) {
+            const rigPt = createDynamicRigStation(randCoord(108), randCoord(108), (seededRandom() - 0.5) * Math.PI * 2);
+            connectToNearestHubWithDirtPath(rigPt, 2.6);
+        }
+        for (let es = 0; es < 3; es++) {
+            const elecPt = createDynamicElectricStation(randCoord(108), randCoord(108), (seededRandom() - 0.5) * Math.PI * 2);
+            connectToNearestHubWithDirtPath(elecPt, 2.5);
+        }
+        for (let gs = 0; gs < 3; gs++) {
+            const gx = (gs === 0) ? (town1X + (seededRandom() - 0.5) * 28) : ((gs === 1) ? (secondTownX + (seededRandom() - 0.5) * 28) : randCoord(104));
+            const gz = (gs === 0) ? (town1Z + (seededRandom() - 0.5) * 28) : ((gs === 1) ? (secondTownZ + (seededRandom() - 0.5) * 28) : randCoord(104));
+            const gasPt = createDynamicGasStation(gx, gz, (seededRandom() - 0.5) * Math.PI * 2);
+            connectToNearestHubWithDirtPath(gasPt, 2.8);
+        }
 
-    // Spawn Dynamic Emergency Evacuation & Medical Relief Camps
-    for (let ev = 0; ev < 3; ev++) {
-        const ePt = createDynamicEvacuationCamp(randCoord(106), randCoord(106), (seededRandom() - 0.5) * Math.PI * 2);
-        connectToNearestHubWithDirtPath(ePt, 2.6);
-    }
+        // Spawn Large Broken Planes with Broken Wing ("Broken Arm"), Plane Body & Dragged Dirt Trail!
+        for (let bp = 0; bp < 3; bp++) {
+            createLargeBrokenPlaneWithDraggedDirt(randCoord(106), randCoord(106), (seededRandom() - 0.5) * Math.PI * 2);
+        }
 
-    // Spawn Dynamic Suburban Frontier Houses with Parked 3D Minivans
-    for (let mv = 0; mv < 14; mv++) {
-        const mx = (mv < 5)
-            ? (town1X + (seededRandom() - 0.5) * 42)
-            : (mv < 10 ? (secondTownX + (seededRandom() - 0.5) * 42) : randCoord(112));
-        const mz = (mv < 5)
-            ? (town1Z + (seededRandom() - 0.5) * 38)
-            : (mv < 10 ? (secondTownZ + (seededRandom() - 0.5) * 38) : randCoord(112));
-        const mvPt = createMinivanSuburbanHouse(mx, mz, (seededRandom() - 0.5) * Math.PI * 2, mv);
-        if (mv < 6) connectToNearestHubWithDirtPath(mvPt, 2.2);
-    }
+        // Spawn Standalone Unexploded Heavy Aerial Bombs (UXO) half-buried across the ground terrain
+        for (let ux = 0; ux < 10; ux++) {
+            createUnexplodedGroundBomb(randCoord(114), randCoord(114), seededRandom() * Math.PI * 2);
+        }
 
-    // Spawn Dynamic Rig Stations, Electric Stations & Gas Stations connected to the road/dirt network
-    for (let rs = 0; rs < 3; rs++) {
-        const rigPt = createDynamicRigStation(randCoord(108), randCoord(108), (seededRandom() - 0.5) * Math.PI * 2);
-        connectToNearestHubWithDirtPath(rigPt, 2.6);
-    }
-    for (let es = 0; es < 3; es++) {
-        const elecPt = createDynamicElectricStation(randCoord(108), randCoord(108), (seededRandom() - 0.5) * Math.PI * 2);
-        connectToNearestHubWithDirtPath(elecPt, 2.5);
-    }
-    for (let gs = 0; gs < 3; gs++) {
-        const gx = (gs === 0) ? (town1X + (seededRandom() - 0.5) * 28) : ((gs === 1) ? (secondTownX + (seededRandom() - 0.5) * 28) : randCoord(104));
-        const gz = (gs === 0) ? (town1Z + (seededRandom() - 0.5) * 28) : ((gs === 1) ? (secondTownZ + (seededRandom() - 0.5) * 28) : randCoord(104));
-        const gasPt = createDynamicGasStation(gx, gz, (seededRandom() - 0.5) * Math.PI * 2);
-        connectToNearestHubWithDirtPath(gasPt, 2.8);
-    }
+        BUILDING_RUINS.forEach((br, idx) => createProceduralUniqueFrontierBuilding(br.x, br.z, idx + 10, true));
+        DYNAMIC_MOUNTAINS.forEach((mt, idx) => {
+            const ang = idx * 2.1 + 0.5;
+            const rx = mt.x + Math.cos(ang) * (mt.r * 0.55);
+            const rz = mt.z + Math.sin(ang) * (mt.r * 0.55);
+            createProceduralUniqueFrontierBuilding(rx, rz, idx + 30, true);
+        });
+        [
+            [-28 + (seededRandom() - 0.5) * 8, 22 + (seededRandom() - 0.5) * 8, 51, false],
+            [28 + (seededRandom() - 0.5) * 8, -18 + (seededRandom() - 0.5) * 8, 52, false],
+            [-10 + (seededRandom() - 0.5) * 8, -28 + (seededRandom() - 0.5) * 8, 53, true],
+            [34 + (seededRandom() - 0.5) * 8, 6 + (seededRandom() - 0.5) * 8, 54, false]
+        ].forEach(([sx, sz, sIdx, damaged]) => createProceduralUniqueFrontierBuilding(sx, sz, sIdx, damaged));
 
-    // Spawn Large Broken Planes with Broken Wing ("Broken Arm"), Plane Body & Dragged Dirt Trail!
-    for (let bp = 0; bp < 3; bp++) {
-        createLargeBrokenPlaneWithDraggedDirt(randCoord(106), randCoord(106), (seededRandom() - 0.5) * Math.PI * 2);
-    }
+        // Dynamically Generated Normal Civilian Houses & Semi-Destroyed Structures
+        for (let h = 0; h < 14; h++) {
+            const hx = (h < 5)
+                ? (ABANDONED_TOWN_CENTER.x + (seededRandom() - 0.5) * 40)
+                : (h < 10 ? (secondTownX + (seededRandom() - 0.5) * 38) : randCoord(110));
+            const hz = (h < 5)
+                ? (ABANDONED_TOWN_CENTER.z + (seededRandom() - 0.5) * 36)
+                : (h < 10 ? (secondTownZ + (seededRandom() - 0.5) * 36) : randCoord(110));
+            createNormalCivilianHouse(hx, hz, (seededRandom() - 0.5) * Math.PI * 2, h);
+        }
+        for (let sd = 0; sd < 8; sd++) {
+            const sdx = (sd < 3)
+                ? (ABANDONED_TOWN_CENTER.x + (seededRandom() - 0.5) * 38)
+                : randCoord(108);
+            const sdz = (sd < 3)
+                ? (ABANDONED_TOWN_CENTER.z + (seededRandom() - 0.5) * 36)
+                : randCoord(108);
+            createSemiDestroyedHumanStructure(sdx, sdz, (seededRandom() - 0.5) * Math.PI * 2, sd);
+        }
 
-    // Spawn Standalone Unexploded Heavy Aerial Bombs (UXO) half-buried across the ground terrain
-    for (let ux = 0; ux < 10; ux++) {
-        createUnexplodedGroundBomb(randCoord(114), randCoord(114), seededRandom() * Math.PI * 2);
+        // Place Street Lights strictly along Supply Road Shoulders (never off-road!)
+        createRoadStreetLights();
+    } else if (isOceanBiome && window.OCEAN_ISLANDS) {
+        // On Ocean Archipelago islands, place naval radar towers & coastal outposts on valid dry island ground
+        window.OCEAN_ISLANDS.forEach((isl, idx) => {
+            if (!isl.isMajor && getTerrainHeight(isl.x, isl.z) > 0.20) {
+                createDynamicMilitaryCommandBuilding(isl.x, isl.z, idx * 1.1);
+            }
+        });
     }
-
-    BUILDING_RUINS.forEach((br, idx) => createProceduralUniqueFrontierBuilding(br.x, br.z, idx + 10, true));
-    DYNAMIC_MOUNTAINS.forEach((mt, idx) => {
-        const ang = idx * 2.1 + 0.5;
-        const rx = mt.x + Math.cos(ang) * (mt.r * 0.55);
-        const rz = mt.z + Math.sin(ang) * (mt.r * 0.55);
-        createProceduralUniqueFrontierBuilding(rx, rz, idx + 30, true);
-    });
-    [
-        [-28 + (seededRandom() - 0.5) * 8, 22 + (seededRandom() - 0.5) * 8, 51, false],
-        [28 + (seededRandom() - 0.5) * 8, -18 + (seededRandom() - 0.5) * 8, 52, false],
-        [-10 + (seededRandom() - 0.5) * 8, -28 + (seededRandom() - 0.5) * 8, 53, true],
-        [34 + (seededRandom() - 0.5) * 8, 6 + (seededRandom() - 0.5) * 8, 54, false]
-    ].forEach(([sx, sz, sIdx, damaged]) => createProceduralUniqueFrontierBuilding(sx, sz, sIdx, damaged));
-
-    // Dynamically Generated Normal Civilian Houses & Semi-Destroyed Structures
-    for (let h = 0; h < 14; h++) {
-        const hx = (h < 5)
-            ? (ABANDONED_TOWN_CENTER.x + (seededRandom() - 0.5) * 40)
-            : (h < 10 ? (secondTownX + (seededRandom() - 0.5) * 38) : randCoord(110));
-        const hz = (h < 5)
-            ? (ABANDONED_TOWN_CENTER.z + (seededRandom() - 0.5) * 36)
-            : (h < 10 ? (secondTownZ + (seededRandom() - 0.5) * 36) : randCoord(110));
-        createNormalCivilianHouse(hx, hz, (seededRandom() - 0.5) * Math.PI * 2, h);
-    }
-    for (let sd = 0; sd < 8; sd++) {
-        const sdx = (sd < 3)
-            ? (ABANDONED_TOWN_CENTER.x + (seededRandom() - 0.5) * 38)
-            : randCoord(108);
-        const sdz = (sd < 3)
-            ? (ABANDONED_TOWN_CENTER.z + (seededRandom() - 0.5) * 36)
-            : randCoord(108);
-        createSemiDestroyedHumanStructure(sdx, sdz, (seededRandom() - 0.5) * Math.PI * 2, sd);
-    }
-
-    // Place Street Lights strictly along Supply Road Shoulders (never off-road!)
-    createRoadStreetLights();
 
     // Dynamically Generated Military Watch & Radar Overwatch Towers
     for (let wt = 0; wt < 6; wt++) {
@@ -10862,8 +11425,7 @@ function populateDynamicWorldPropsAndLandmarks() {
     });
 
     // 6. Biome Landmarks, Bomb Craters, Bunkers, Trenches, Mortars & Convoys
-    const biome = ACTIVE_PLANET_BIOME || 'highland';
-    if (biome !== 'desert' && biome !== 'lava') {
+    if (biome !== 'desert' && biome !== 'lava' && biome !== 'ocean') {
         createMountainWaterwall();
     }
     ROCKY_TERRAIN_ZONES.forEach(rz => createRockyTerrainZone(rz));
@@ -10939,6 +11501,8 @@ function populateDynamicWorldPropsAndLandmarks() {
         createLavaBiomeFeatures(isClearOfAllStructuresAndPaths);
     } else if (biome === 'jungle') {
         createDenseJungleBiomeFeatures(isClearOfAllStructuresAndPaths);
+    } else if (biome === 'ocean') {
+        createOceanBiomeFeatures(isClearOfAllStructuresAndPaths);
     }
 
     if (biome !== 'desert' && biome !== 'lava') {
@@ -11070,157 +11634,33 @@ function populateDynamicWorldPropsAndLandmarks() {
         }
     }
 
-    createTerrainMeadowGrassMesh();
+    if (biome !== 'lava') {
+        createTerrainMeadowGrassMesh();
+    }
     updateZergCreepColors(creepRadius, false, true);
 }
 
-// Hole-Free Terrain-Conforming Zerg Creep Ground Surface (Compact Radius, Wave-Like Goo Ridges, Zero Center Hole, Zero Animation!)
+// Single-layer Zerg Creep: Zerg creep is rendered directly on the terrain mesh via updateZergCreepColors() and SHADER_ENGINE.setZergCreepUniforms.
+// Do NOT spawn a duplicate floating RingGeometry overlay mesh on top of the terrain creep layer!
 function createZergBaseCreepGroundSurface(centerX, centerZ, baseRadius = 16.5, isPrimaryMain = false) {
-    const radialSegs = 64;
-    const ringSegs = 28;
-    // Inner radius = 0.0 so there is ZERO center hole under the Zerg Hatchery!
-    const geo = new THREE.RingGeometry(0.0, 1.0, radialSegs, ringSegs);
-    geo.rotateX(-Math.PI / 2);
-    const pos = geo.attributes.position;
-    const colors = new Float32Array(pos.count * 3);
-    const unitCoords = new Float32Array(pos.count * 2);
-
-    for (let i = 0; i < pos.count; i++) {
-        const lx = pos.getX(i);
-        const lz = pos.getZ(i);
-        const rawR = Math.hypot(lx, lz);
-        const ang = Math.atan2(lz, lx);
-        const rFrac = Math.min(1.0, rawR);
-        // Smooth organic multi-lobed perimeter contour (zero lines, zero dots, zero animation)
-        const lobeMod = 1.0 + (0.07 * Math.sin(ang * 5.0 + 0.7) + 0.045 * Math.cos(ang * 8.0 - 0.4)) * Math.pow(rFrac, 1.5);
-        const ux = lx * lobeMod;
-        const uz = lz * lobeMod;
-        unitCoords[i * 2] = ux;
-        unitCoords[i * 2 + 1] = uz;
-
-        const fx = ux * baseRadius;
-        const fz = uz * baseRadius;
-        const wx = centerX + fx;
-        const wz = centerZ + fz;
-        const dCenter = Math.hypot(fx, fz);
-        const h0 = getTerrainHeight(wx, wz);
-        const hMax = Math.max(
-            h0,
-            getTerrainHeight(wx + 0.65, wz),
-            getTerrainHeight(wx - 0.65, wz),
-            getTerrainHeight(wx, wz + 0.65),
-            getTerrainHeight(wx, wz - 0.65)
-        );
-        // Static wave-like viscous goo ridge undulation sculpted into the 3D creep ground surface!
-        const gooWaveRidge = Math.sin(dCenter * 1.45 + Math.sin(ang * 5.0 + dCenter * 0.4) * 1.35) * 0.5 + 0.5;
-        const crossGoo = Math.cos(wx * 0.65 - Math.sin(wz * 0.65) * 1.2) * 0.5 + 0.5;
-        const waveCrest = gooWaveRidge * 0.62 + crossGoo * 0.38;
-        const wy = Math.max(h0, (h0 + hMax) * 0.5) + 0.068 + waveCrest * 0.045 * (1.0 - Math.pow(rFrac, 2.0));
-        pos.setXYZ(i, fx, wy, fz);
-
-        const edgeDarken = 1.0 - Math.pow(rFrac, 2.4) * 0.24;
-        colors[i * 3]     = (0.58 + waveCrest * 0.32) * edgeDarken;
-        colors[i * 3 + 1] = (0.34 + waveCrest * 0.18) * edgeDarken;
-        colors[i * 3 + 2] = (0.68 + waveCrest * 0.34) * edgeDarken;
-    }
-    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-    geo.computeVertexNormals();
-    geo.userData = { unitCoords };
-
-    const creepSurfaceMat = new THREE.MeshStandardMaterial({
-        vertexColors: true,
-        map: (typeof creepOverlayTex !== 'undefined') ? creepOverlayTex : null,
-        roughness: 0.24,
-        metalness: 0.16,
-        emissive: 0x260636,
-        emissiveIntensity: 0.40,
-        polygonOffset: true,
-        polygonOffsetFactor: -4,
-        polygonOffsetUnits: -4
-    });
-    if (typeof SHADER_ENGINE !== 'undefined' && typeof SHADER_ENGINE.applyBuildingShader === 'function') {
-        SHADER_ENGINE.applyBuildingShader(creepSurfaceMat);
-    }
-
-    const mesh = new THREE.Mesh(geo, creepSurfaceMat);
-    mesh.position.set(centerX, 0, centerZ);
-    mesh.receiveShadow = true;
-    mesh.userData = { baseRadius, unitCoords };
-    addMapMesh(mesh);
     if (isPrimaryMain) {
-        activeZergMainCreepMesh = mesh;
-    } else {
-        activeZergExpansionCreepMeshes.push(mesh);
+        activeZergMainCreepMesh = null;
     }
-    return mesh;
+    return null;
 }
 window.spawnZergExpansionCreepBlanket = function(cx, cz, rad = 13.5) {
-    return createZergBaseCreepGroundSurface(cx, cz, rad, false);
+    return null;
 };
 
-// Semi-Textured Zerg Creep Apron Ring around Terrain Structures, Rocks & Ruins near/inside the Creep Zone
 function createSemiTextureStructureCreepApron(sx, sz, structRadius = 2.0) {
-    const innerR = Math.max(0.2, structRadius * 0.35);
-    const outerR = structRadius + 2.15;
-    const apronGeo = new THREE.RingGeometry(innerR, outerR, 28, 6);
-    apronGeo.rotateX(-Math.PI / 2);
-    const pos = apronGeo.attributes.position;
-    const cols = new Float32Array(pos.count * 3);
-    for (let i = 0; i < pos.count; i++) {
-        const lx = pos.getX(i);
-        const lz = pos.getZ(i);
-        const r = Math.hypot(lx, lz);
-        const ang = Math.atan2(lz, lx);
-        const rNorm = THREE.MathUtils.clamp((r - innerR) / Math.max(0.1, outerR - innerR), 0, 1);
-        const lobe = 1.0 + (0.14 * Math.sin(ang * 6.0 + sx) + 0.09 * Math.cos(ang * 9.0 - sz)) * rNorm;
-        const fx = lx * lobe;
-        const fz = lz * lobe;
-        const wx = sx + fx;
-        const wz = sz + fz;
-        const gooWave = Math.sin(r * 2.2 + Math.cos(ang * 4.0) * 1.2) * 0.5 + 0.5;
-        const wy = getTerrainHeight(wx, wz) + 0.055 + (1.0 - rNorm) * 0.14 + gooWave * 0.025;
-        pos.setXYZ(i, fx, wy, fz);
-
-        const fade = (0.85 + gooWave * 0.25) * (1.0 - Math.pow(rNorm, 1.6) * 0.45);
-        cols[i * 3]     = 0.64 * fade;
-        cols[i * 3 + 1] = 0.38 * fade;
-        cols[i * 3 + 2] = 0.74 * fade;
-    }
-    apronGeo.setAttribute('color', new THREE.BufferAttribute(cols, 3));
-    apronGeo.computeVertexNormals();
-
-    const apronMat = new THREE.MeshStandardMaterial({
-        vertexColors: true,
-        map: (typeof creepOverlayTex !== 'undefined') ? creepOverlayTex : null,
-        roughness: 0.26,
-        metalness: 0.14,
-        emissive: 0x22052f,
-        emissiveIntensity: 0.36,
-        transparent: true,
-        opacity: 0.80,
-        polygonOffset: true,
-        polygonOffsetFactor: -3,
-        polygonOffsetUnits: -3
-    });
-    if (typeof SHADER_ENGINE !== 'undefined' && typeof SHADER_ENGINE.applyBuildingShader === 'function') {
-        SHADER_ENGINE.applyBuildingShader(apronMat);
-    }
-    const apronMesh = new THREE.Mesh(apronGeo, apronMat);
-    apronMesh.position.set(sx, 0, sz);
-    apronMesh.receiveShadow = true;
-    apronMesh.visible = isPointOnZergCreep(sx, sz);
-    addMapMesh(apronMesh);
-    frontierBuildingInfestations.push({ x: sx, z: sz, group: apronMesh });
+    return null;
 }
 
 // 3D Zerg Goo & Biomass Encrustations covering generated rocks, cliffs, ruins & structures inside the Zerg Creep Zone
 function createZergCreepZoneGooCoverings() {
     const hiveCenter = ENEMY_BASE_POS;
-    // Always generate the hole-free, terrain-conforming Zerg Main Base Creep Ground Surface directly at ENEMY_BASE_POS
-    // plus connected creep blankets under the Spawning Pool (ENEMY_BARRACKS_POS) & Bio-Factory (ENEMY_FACTORY_POS)!
-    createZergBaseCreepGroundSurface(hiveCenter.x, hiveCenter.z, Math.max(16.5, creepRadius), true);
-    createZergBaseCreepGroundSurface(ENEMY_BARRACKS_POS.x, ENEMY_BARRACKS_POS.z, 9.5, false);
-    createZergBaseCreepGroundSurface(ENEMY_FACTORY_POS.x, ENEMY_FACTORY_POS.z, 9.5, false);
+    activeZergMainCreepMesh = null;
+    activeZergExpansionCreepMeshes.length = 0;
 
     const gooMembraneMat = new THREE.MeshStandardMaterial({
         color: 0x3b112c,
@@ -12375,8 +12815,8 @@ function populateProceduralWorldEcosystem() {
     const baseDet = abandon > 0.78 ? 3 : (abandon > 0.42 ? 2 : 1);
     const biome = ACTIVE_PLANET_BIOME || 'highland';
 
-    // 1. Rural Agricultural Village & Homestead Cluster
-    if ((cfg.urbanDensity ?? 1.0) > 0.15) {
+    // 1. Rural Agricultural Village & Homestead Cluster (Skipped in Lava & Ocean Archipelago biomes)
+    if (biome !== 'lava' && biome !== 'ocean' && (cfg.urbanDensity ?? 1.0) > 0.15) {
         const rvx = THREE.MathUtils.clamp(-58 + (seededRandom() - 0.5) * 14, -84, 84);
         const rvz = THREE.MathUtils.clamp(18 + (seededRandom() - 0.5) * 14, -84, 84);
         if (isSafeForProp(rvx, rvz, 7.5)) {
@@ -12385,7 +12825,7 @@ function populateProceduralWorldEcosystem() {
     }
 
     // 2. Industrial Wind Turbine & Solar Array Complex
-    if ((cfg.industrialDensity ?? 1.0) > 0.15) {
+    if (biome !== 'lava' && (cfg.industrialDensity ?? 1.0) > 0.15) {
         const wx = THREE.MathUtils.clamp(62 + (seededRandom() - 0.5) * 12, -84, 84);
         const wz = THREE.MathUtils.clamp(-14 + (seededRandom() - 0.5) * 12, -84, 84);
         if (isSafeForProp(wx, wz, 7.0)) {
@@ -12394,7 +12834,7 @@ function populateProceduralWorldEcosystem() {
     }
 
     // 3. Derelict Industrial Railway Spur & Locomotive
-    if ((cfg.roadDensity ?? 1.0) > 0.15) {
+    if (biome !== 'lava' && biome !== 'ocean' && (cfg.roadDensity ?? 1.0) > 0.15) {
         const rx = THREE.MathUtils.clamp(-64 + (seededRandom() - 0.5) * 10, -86, 86);
         const rz = THREE.MathUtils.clamp(-24 + (seededRandom() - 0.5) * 10, -86, 86);
         if (isSafeForProp(rx, rz, 6.5)) {
@@ -12403,56 +12843,60 @@ function populateProceduralWorldEcosystem() {
     }
 
     // 4. Procedural Architectural Grammar Buildings along Supply Roads & Settlement Outskirts
-    const buildingCandidateSpots = [
-        { x: -34, z: 36, style: 'commercial', stories: 2 },
-        { x: 36, z: 32, style: 'industrial', stories: 1 },
-        { x: -38, z: -34, style: 'industrial', stories: 1 },
-        { x: 42, z: -38, style: 'commercial', stories: 2 },
-        { x: -18, z: 46, style: 'residential', stories: 1 },
-        { x: 24, z: 48, style: 'residential', stories: 2 }
-    ];
-    const maxBlds = Math.round(buildingCandidateSpots.length * (cfg.urbanDensity ?? 1.0));
-    for (let i = 0; i < Math.min(buildingCandidateSpots.length, maxBlds); i++) {
-        const sp = buildingCandidateSpots[i];
-        const bx = sp.x + (seededRandom() - 0.5) * 6.0;
-        const bz = sp.z + (seededRandom() - 0.5) * 6.0;
-        if (isSafeForProp(bx, bz, 5.2)) {
-            const det = Math.max(1, Math.min(4, baseDet + (i % 2)));
-            buildArchitecturalGrammarBuilding(bx, bz, seededRandom() * Math.PI * 2, {
-                style: sp.style,
-                stories: sp.stories,
-                deterioration: det
-            });
+    if (biome !== 'lava' && biome !== 'ocean') {
+        const buildingCandidateSpots = [
+            { x: -34, z: 36, style: 'commercial', stories: 2 },
+            { x: 36, z: 32, style: 'industrial', stories: 1 },
+            { x: -38, z: -34, style: 'industrial', stories: 1 },
+            { x: 42, z: -38, style: 'commercial', stories: 2 },
+            { x: -18, z: 46, style: 'residential', stories: 1 },
+            { x: 24, z: 48, style: 'residential', stories: 2 }
+        ];
+        const maxBlds = Math.round(buildingCandidateSpots.length * (cfg.urbanDensity ?? 1.0));
+        for (let i = 0; i < Math.min(buildingCandidateSpots.length, maxBlds); i++) {
+            const sp = buildingCandidateSpots[i];
+            const bx = sp.x + (seededRandom() - 0.5) * 6.0;
+            const bz = sp.z + (seededRandom() - 0.5) * 6.0;
+            if (isSafeForProp(bx, bz, 5.2)) {
+                const det = Math.max(1, Math.min(4, baseDet + (i % 2)));
+                buildArchitecturalGrammarBuilding(bx, bz, seededRandom() * Math.PI * 2, {
+                    style: sp.style,
+                    stories: sp.stories,
+                    deterioration: det
+                });
+            }
         }
     }
 
-    // 5. Biome-Appropriate Multi-Species 3D Forest Groves
+    // 5. Biome-Appropriate Multi-Species 3D Forest Groves (Zero green trees in Lava biome!)
     const groveCenters = biome === 'lava'
-        ? [
-            { x: -46, z: 8, species: 'snag' },
-            { x: 48, z: 12, species: 'snag' },
-            { x: -44, z: -48, species: 'snag' }
-        ]
-        : (biome === 'desert'
+        ? []
+        : (biome === 'ocean'
             ? [
-                { x: -44, z: -48, species: 'snag' },
-                { x: 16, z: 22, species: 'palm' }
+                { x: PLAYER_START_POS.x + 12, z: PLAYER_START_POS.z - 12, species: 'palm' },
+                { x: SOLARIS_BASE_POS.x - 10, z: SOLARIS_BASE_POS.z + 10, species: 'palm' },
+                { x: 0, z: 0, species: 'palm' }
             ]
-            : (biome === 'jungle'
+            : (biome === 'desert'
                 ? [
-                    { x: -46, z: 8, species: 'palm' },
-                    { x: 48, z: 12, species: 'oak' },
-                    { x: -44, z: -48, species: 'palm' },
-                    { x: 16, z: 22, species: 'palm' },
-                    { x: -18, z: -26, species: 'oak' },
-                    { x: 28, z: -22, species: 'palm' }
-                ]
-                : [
-                    { x: -46, z: 8, species: 'oak' },
-                    { x: 48, z: 12, species: 'birch' },
                     { x: -44, z: -48, species: 'snag' },
                     { x: 16, z: 22, species: 'palm' }
-                ]));
+                ]
+                : (biome === 'jungle'
+                    ? [
+                        { x: -46, z: 8, species: 'palm' },
+                        { x: 48, z: 12, species: 'oak' },
+                        { x: -44, z: -48, species: 'palm' },
+                        { x: 16, z: 22, species: 'palm' },
+                        { x: -18, z: -26, species: 'oak' },
+                        { x: 28, z: -22, species: 'palm' }
+                    ]
+                    : [
+                        { x: -46, z: 8, species: 'oak' },
+                        { x: 48, z: 12, species: 'birch' },
+                        { x: -44, z: -48, species: 'snag' },
+                        { x: 16, z: 22, species: 'palm' }
+                    ])));
     const forestMult = (cfg.forestDensity ?? 1.0) * (biome === 'jungle' ? 1.5 : 1.0);
     groveCenters.forEach(gc => {
         PROCEDURAL_FOREST_GROVES.push({ x: gc.x, z: gc.z, r: 9.5 });
