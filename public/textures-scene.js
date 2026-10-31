@@ -771,8 +771,183 @@ window.addEventListener('blur', () => {
     for (const k in keysPressed) keysPressed[k] = false;
 });
 
+// ============================================================================
+// WEBGL CONTEXT LOSS / RESTORATION RECOVERY & GRAPHICS DIAGNOSTICS ENGINE
+// ============================================================================
+const GRAPHICS_DIAGNOSTICS = {
+    contextStatus: 'ACTIVE',
+    contextLossCount: 0,
+    contextRestoreCount: 0,
+    lastContextEventTime: null,
+    rendererInfo: {
+        vendor: 'WebGL',
+        renderer: 'Hardware Accelerated',
+        version: '',
+        shadingLanguageVersion: '',
+        maxTextureSize: 4096,
+        maxAnisotropy: 1
+    },
+    shaderValidation: {
+        validatedCount: 0,
+        failedInjections: [],
+        compilationErrors: [],
+        fallbackMaterialsUsed: 0,
+        lastValidatedAt: null
+    },
+    lowQualityMobileFallback: false,
+    initRendererCapabilities() {
+        try {
+            const gl = renderer.getContext();
+            if (gl) {
+                const dbgExt = gl.getExtension('WEBGL_debug_renderer_info');
+                this.rendererInfo.vendor = (dbgExt && gl.getParameter(dbgExt.UNMASKED_VENDOR_WEBGL)) || gl.getParameter(gl.VENDOR) || 'Unknown Vendor';
+                this.rendererInfo.renderer = (dbgExt && gl.getParameter(dbgExt.UNMASKED_RENDERER_WEBGL)) || gl.getParameter(gl.RENDERER) || 'Unknown GPU';
+                this.rendererInfo.version = gl.getParameter(gl.VERSION) || 'WebGL';
+                this.rendererInfo.shadingLanguageVersion = gl.getParameter(gl.SHADING_LANGUAGE_VERSION) || 'GLSL';
+                this.rendererInfo.maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) || 2048;
+            }
+            if (renderer.capabilities && renderer.capabilities.getMaxAnisotropy) {
+                this.rendererInfo.maxAnisotropy = renderer.capabilities.getMaxAnisotropy();
+            }
+            const lowGpuPattern = /Mali-4|Mali-T|Adreno \(TM\) [234]|PowerVR SGX|SwiftShader|llvmpipe/i;
+            if (IS_MOBILE && (this.rendererInfo.maxTextureSize <= 4096 || lowGpuPattern.test(this.rendererInfo.renderer) || (navigator.deviceMemory && navigator.deviceMemory <= 3))) {
+                this.lowQualityMobileFallback = true;
+                PERF_MANAGER.applyTier('low');
+            }
+        } catch (err) {
+            this.shaderValidation.compilationErrors.push(`Capability probe error: ${err && err.message ? err.message : String(err)}`);
+        }
+    },
+    recordShaderInjectionFailure(matName, missingAnchors) {
+        const entry = {
+            time: new Date().toISOString(),
+            material: matName || 'TerrainStandardMaterial',
+            missingAnchors
+        };
+        this.shaderValidation.failedInjections.push(entry);
+        if (this.shaderValidation.failedInjections.length > 24) {
+            this.shaderValidation.failedInjections.shift();
+        }
+        this.shaderValidation.fallbackMaterialsUsed++;
+    },
+    recordShaderError(msg) {
+        this.shaderValidation.compilationErrors.push({
+            time: new Date().toISOString(),
+            message: String(msg)
+        });
+        if (this.shaderValidation.compilationErrors.length > 24) {
+            this.shaderValidation.compilationErrors.shift();
+        }
+    },
+    showContextBanner(text, isWarning = true) {
+        let banner = document.getElementById('webgl-context-banner');
+        if (!banner) {
+            banner = document.createElement('div');
+            banner.id = 'webgl-context-banner';
+            banner.style.cssText = 'position:fixed;top:46px;left:50%;transform:translateX(-50%);z-index:9999;padding:8px 16px;border-radius:6px;font-family:monospace;font-size:12px;font-weight:700;letter-spacing:0.6px;pointer-events:auto;box-shadow:0 6px 20px rgba(0,0,0,0.65);display:none;';
+            document.body.appendChild(banner);
+        }
+        if (!text) {
+            banner.style.display = 'none';
+            return;
+        }
+        banner.style.display = 'block';
+        banner.style.background = isWarning ? 'rgba(185, 28, 28, 0.94)' : 'rgba(6, 95, 70, 0.94)';
+        banner.style.border = isWarning ? '1px solid #fca5a5' : '1px solid #6ee7b7';
+        banner.style.color = '#ffffff';
+        banner.innerText = text;
+    },
+    getSnapshot() {
+        const info = (renderer && renderer.info) ? renderer.info : {};
+        const rInfo = info.render || {};
+        const mInfo = info.memory || {};
+        return {
+            contextStatus: this.contextStatus,
+            contextLossCount: this.contextLossCount,
+            contextRestoreCount: this.contextRestoreCount,
+            lastContextEventTime: this.lastContextEventTime,
+            rendererInfo: { ...this.rendererInfo },
+            shaderValidation: {
+                validatedCount: this.shaderValidation.validatedCount,
+                fallbackMaterialsUsed: this.shaderValidation.fallbackMaterialsUsed,
+                failedInjections: this.shaderValidation.failedInjections.slice(-6),
+                compilationErrors: this.shaderValidation.compilationErrors.slice(-6)
+            },
+            drawCalls: rInfo.calls || 0,
+            triangles: rInfo.triangles || 0,
+            geometries: mInfo.geometries || 0,
+            textures: mInfo.textures || 0,
+            fps: +(PERF_MANAGER.rollingFps || 60).toFixed(1),
+            frameTimeMs: +(PERF_MANAGER.rollingFrameMs || 16.7).toFixed(2),
+            qualityTier: PERF_MANAGER.current ? PERF_MANAGER.current.name : 'High',
+            devicePixelRatio: +(renderer.getPixelRatio ? renderer.getPixelRatio() : (window.devicePixelRatio || 1)).toFixed(2),
+            lowQualityMobileFallback: this.lowQualityMobileFallback
+        };
+    }
+};
+window.GRAPHICS_DIAGNOSTICS = GRAPHICS_DIAGNOSTICS;
+GRAPHICS_DIAGNOSTICS.initRendererCapabilities();
+
+if (renderer.debug) {
+    renderer.debug.checkShaderErrors = true;
+    renderer.debug.onShaderError = (gl, program, glVertexShader, glFragmentShader) => {
+        try {
+            const vLog = gl.getShaderInfoLog(glVertexShader) || '';
+            const fLog = gl.getShaderInfoLog(glFragmentShader) || '';
+            const pLog = gl.getProgramInfoLog(program) || '';
+            GRAPHICS_DIAGNOSTICS.recordShaderError(`Shader compile/link error: ${vLog} ${fLog} ${pLog}`.trim());
+        } catch (err) {
+            GRAPHICS_DIAGNOSTICS.recordShaderError(err && err.message ? err.message : 'Shader error');
+        }
+    };
+}
+
 renderer.domElement.addEventListener('webglcontextlost', e => {
     e.preventDefault();
+    GRAPHICS_DIAGNOSTICS.contextStatus = 'LOST';
+    GRAPHICS_DIAGNOSTICS.contextLossCount++;
+    GRAPHICS_DIAGNOSTICS.lastContextEventTime = new Date().toISOString();
+    GRAPHICS_DIAGNOSTICS.showContextBanner('⚠️ WEBGL GRAPHICS CONTEXT LOST — Pausing GPU draw calls & attempting automatic hardware recovery...', true);
+    if (IS_MOBILE) {
+        GRAPHICS_DIAGNOSTICS.lowQualityMobileFallback = true;
+        PERF_MANAGER.applyTier('low');
+    }
+});
+
+renderer.domElement.addEventListener('webglcontextrestored', () => {
+    GRAPHICS_DIAGNOSTICS.contextStatus = 'RESTORED';
+    GRAPHICS_DIAGNOSTICS.contextRestoreCount++;
+    GRAPHICS_DIAGNOSTICS.lastContextEventTime = new Date().toISOString();
+    try {
+        [terrainDetailTex, terrainNormalTex, metalTex, metalNormalTex, zergChitinTex, zergNormalTex, solarisArmorTex, _fallbackFowTex, creepOverlayTex].forEach(tex => {
+            if (tex && tex.isTexture) tex.needsUpdate = true;
+        });
+        if (typeof fowTexture !== 'undefined' && fowTexture) {
+            fowTexture.needsUpdate = true;
+        }
+        scene.traverse(obj => {
+            if (obj.isMesh) {
+                if (obj.geometry && obj.geometry.attributes) {
+                    for (const k in obj.geometry.attributes) {
+                        obj.geometry.attributes[k].needsUpdate = true;
+                    }
+                }
+                const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+                mats.forEach(m => { if (m) m.needsUpdate = true; });
+            }
+        });
+        window._forceFowReset = true;
+        if (typeof updateFogOfWarVision === 'function') updateFogOfWarVision();
+        GRAPHICS_DIAGNOSTICS.showContextBanner('✓ WEBGL GRAPHICS CONTEXT RESTORED — Terrain, shaders & textures recovered.', false);
+        setTimeout(() => {
+            if (GRAPHICS_DIAGNOSTICS.contextStatus === 'RESTORED') {
+                GRAPHICS_DIAGNOSTICS.contextStatus = 'ACTIVE';
+                GRAPHICS_DIAGNOSTICS.showContextBanner(null);
+            }
+        }, 4000);
+    } catch (err) {
+        GRAPHICS_DIAGNOSTICS.recordShaderError(`Context restore error: ${err && err.message ? err.message : String(err)}`);
+    }
 });
 
 // Procedural Web Audio Synthesizer (Weight-scaled tactical feedback with mute toggle)
@@ -1862,7 +2037,8 @@ const fowCloudShaderMat = new THREE.ShaderMaterial({
     uniforms: {
         uFowMap: { value: _fallbackFowTex },
         uTime: { value: 0.0 },
-        uMapSize: { value: 260.0 }
+        uMapSize: { value: 260.0 },
+        uTitleScreen: _sharedTitleFlag
     },
     transparent: true,
     depthWrite: false,
@@ -1883,6 +2059,7 @@ const fowCloudShaderMat = new THREE.ShaderMaterial({
         uniform sampler2D uFowMap;
         uniform float uTime;
         uniform float uMapSize;
+        uniform float uTitleScreen;
         varying vec2 vUv;
         varying vec3 vWorldPos;
 
@@ -1917,6 +2094,9 @@ const fowCloudShaderMat = new THREE.ShaderMaterial({
         }
 
         void main() {
+            // Never darken title screen or loading/cinematic sweep with gameplay fog
+            if (uTitleScreen > 0.5) discard;
+
             // 9-tap Gaussian-weighted Fog of War sampling for ultra-smooth organic cloud borders
             vec2 texel = vec2(1.5 / 192.0);
             float a0 = texture2D(uFowMap, vUv).a * 0.28;
@@ -1930,7 +2110,7 @@ const fowCloudShaderMat = new THREE.ShaderMaterial({
             float aSW = texture2D(uFowMap, vUv - texel).a * 0.06;
             float rawFow = a0 + aN + aS + aE + aW + aNE + aNW + aSE + aSW;
 
-            if (rawFow < 0.015) discard;
+            if (rawFow < 0.02) discard;
 
             // Domain-warped multi-altitude atmospheric cloud layers (Low stratus + High billowing cumulus)
             vec2 baseUv = vWorldPos.xz * 0.028;
@@ -1952,18 +2132,20 @@ const fowCloudShaderMat = new THREE.ShaderMaterial({
 
             // Feathered, billowing cloud-bank edge along the line-of-sight boundary
             float edgeBand = 4.0 * rawFow * (1.0 - rawFow);
-            float softFow = smoothstep(0.05, 0.92, rawFow + (billow - 0.48) * 0.28 * edgeBand);
+            float softFow = smoothstep(0.08, 0.94, rawFow + (billow - 0.48) * 0.24 * edgeBand);
 
-            // Rich volumetric cloud palette: deep slate-indigo cloud base, moonlit silver-blue crests, and wispy rim
-            vec3 cloudShadowBase = vec3(0.014, 0.024, 0.044);
-            vec3 cloudMidBody    = vec3(0.048, 0.078, 0.128);
-            vec3 cloudSilverCrest = vec3(0.145, 0.215, 0.310);
+            // Subtle atmospheric mist palette so underlying biome terrain colors remain recognizable
+            vec3 cloudShadowBase = vec3(0.14, 0.20, 0.30);
+            vec3 cloudMidBody    = vec3(0.22, 0.31, 0.44);
+            vec3 cloudSilverCrest = vec3(0.34, 0.46, 0.62);
 
             vec3 cloudCol = mix(cloudShadowBase, cloudMidBody, smoothstep(0.22, 0.72, billow));
             cloudCol = mix(cloudCol, cloudSilverCrest, smoothstep(0.52, 0.92, billow * 0.65 + cloudLit * 0.45) * (0.42 + edgeBand * 0.58));
 
-            float puffDensity = mix(0.68, 1.18, smoothstep(0.25, 0.85, billow));
-            float finalAlpha = clamp(softFow * puffDensity * 0.36, 0.0, 0.48);
+            float puffDensity = mix(0.60, 1.05, smoothstep(0.25, 0.85, billow));
+            // Explored areas (rawFow ~ 0.45) get almost zero cloud veil; unexplored areas get a subtle translucent mist (max 0.22 alpha)
+            float unexploredWeight = smoothstep(0.42, 0.88, rawFow);
+            float finalAlpha = clamp((softFow * 0.08 + unexploredWeight * 0.16) * puffDensity, 0.0, 0.22);
             gl_FragColor = vec4(cloudCol, finalAlpha);
         }
     `
@@ -2094,6 +2276,33 @@ const SHADER_ENGINE = {
             if (shader.fragmentShader.includes('uniform sampler2D uFowMap;') || shader.vertexShader.includes('varying vec3 vCustomWorldPos;')) {
                 return;
             }
+            // Validate all required shader injection points before modifying shader code.
+            // If any anchor is missing, record the exact missing anchor in GRAPHICS_DIAGNOSTICS and keep safe standard material.
+            const reqVertexAnchors = ['#include <begin_vertex>', '#include <worldpos_vertex>'];
+            const reqFragAnchors = [
+                '#include <color_fragment>',
+                '#include <roughnessmap_fragment>',
+                '#include <emissivemap_fragment>',
+                '#include <dithering_fragment>'
+            ];
+            const missingAnchors = [];
+            for (let i = 0; i < reqVertexAnchors.length; i++) {
+                if (!shader.vertexShader.includes(reqVertexAnchors[i])) missingAnchors.push(`vertex:${reqVertexAnchors[i]}`);
+            }
+            for (let i = 0; i < reqFragAnchors.length; i++) {
+                if (!shader.fragmentShader.includes(reqFragAnchors[i])) missingAnchors.push(`fragment:${reqFragAnchors[i]}`);
+            }
+            if (missingAnchors.length > 0) {
+                if (typeof GRAPHICS_DIAGNOSTICS !== 'undefined') {
+                    GRAPHICS_DIAGNOSTICS.recordShaderInjectionFailure(material.name || (isRoadMaterial ? 'RoadMaterial' : (isBuildingMaterial ? 'BuildingMaterial' : 'TerrainMaterial')), missingAnchors);
+                }
+                return;
+            }
+            if (typeof GRAPHICS_DIAGNOSTICS !== 'undefined') {
+                GRAPHICS_DIAGNOSTICS.shaderValidation.validatedCount++;
+                GRAPHICS_DIAGNOSTICS.shaderValidation.lastValidatedAt = new Date().toISOString();
+            }
+
             shader.uniforms.uTime = this.terrainUniforms.uTime;
             shader.uniforms.uWetness = this.terrainUniforms.uWetness;
             shader.uniforms.uAcidRain = this.terrainUniforms.uAcidRain;
@@ -2199,6 +2408,7 @@ const SHADER_ENGINE = {
             ` + shader.fragmentShader.replace(
                 '#include <color_fragment>',
                 `#include <color_fragment>
+                float lavaFissureGlow = 0.0;
                 if (uIsGrass > 0.5 && uCreepRadius > 0.5) {
                     float minGDist = 999.0;
                     for (int cn = 0; cn < ${MAX_CREEP_SHADER_NODES}; cn++) {
@@ -2226,36 +2436,37 @@ const SHADER_ENGINE = {
                     float strataLayer = sin(vCustomWorldPos.y * 5.6 + sin(vCustomWorldPos.x * 0.75 + vCustomWorldPos.z * 0.65) * 1.5);
                     float fracture = cos(vCustomWorldPos.x * 2.8 - vCustomWorldPos.y * 3.2) * sin(vCustomWorldPos.z * 2.6 + vCustomWorldPos.y * 2.9);
                     float rockCreviceAO = smoothstep(-0.85, 0.45, strataLayer * 0.65 + fracture * 0.35);
-                    vec3 rockWarmTint = mix(vec3(0.62, 0.64, 0.68), vec3(1.06, 1.03, 0.98), rockCreviceAO);
-                    diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * rockWarmTint, slopeFactor * 0.84);
+                    vec3 rockWarmTint = mix(vec3(0.68, 0.70, 0.74), vec3(1.06, 1.03, 0.98), rockCreviceAO);
+                    diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * rockWarmTint, slopeFactor * 0.76);
                 }
-                if (abs(uBiomeId - 3.0) < 0.4 && terrainOnly > 0.5 && vCustomWorldPos.y < 1.8) {
+                if (abs(uBiomeId - 3.0) < 0.4 && terrainOnly > 0.5 && vCustomWorldPos.y < 2.2) {
                     // Lava Planet glowing ground cracks in low volcanic ash basins
                     float crack1 = 1.0 - abs(sin(vCustomWorldPos.x * 0.85 + sin(vCustomWorldPos.z * 0.65) * 1.8));
                     float crack2 = 1.0 - abs(cos(vCustomWorldPos.z * 0.92 - cos(vCustomWorldPos.x * 0.72) * 1.6));
-                    float lavaCrack = smoothstep(0.92, 0.992, crack1 * crack2);
-                    float pulse = 0.75 + 0.25 * sin(uTime * 2.4 + vCustomWorldPos.x * 0.5);
-                    diffuseColor.rgb = mix(diffuseColor.rgb, vec3(1.0, 0.38, 0.04) * pulse, lavaCrack * 0.72);
+                    float lavaCrack = smoothstep(0.90, 0.992, crack1 * crack2);
+                    float pulse = 0.78 + 0.22 * sin(uTime * 2.4 + vCustomWorldPos.x * 0.5);
+                    lavaFissureGlow = lavaCrack * pulse;
+                    diffuseColor.rgb = mix(diffuseColor.rgb, vec3(1.0, 0.42, 0.06) * pulse, lavaCrack * 0.85);
                 }
                 if (uIsGrass > 0.5) {
                     float grassTip = clamp(vCustomWorldPos.y * 1.6, 0.0, 1.0);
-                    diffuseColor.rgb *= mix(0.72, 1.12, grassTip);
+                    diffuseColor.rgb *= mix(0.76, 1.12, grassTip);
                 }
 
                 // 3. Dynamic Acid Rain Wetness Sheen
                 if (uWetness > 0.01) {
-                    diffuseColor.rgb *= (1.0 - uWetness * (0.14 * (1.0 - uIsBuilding * 0.65)));
+                    diffuseColor.rgb *= (1.0 - uWetness * (0.12 * (1.0 - uIsBuilding * 0.65)));
                     diffuseColor.rgb += vec3(0.01, 0.04, 0.01) * uAcidRain * uWetness * (1.0 - uIsRoad * 0.65 - uIsBuilding * 0.75);
                 }
 
                 // 4. Micro-aggregate asphalt grain on roads
                 if (uIsRoad > 0.5) {
-                    float grain = 0.92 + 0.08 * fract(sin(dot(floor(vCustomWorldPos.xz * 14.0), vec2(12.9898, 78.233))) * 43758.5453);
-                    diffuseColor.rgb *= grain * 0.86;
+                    float grain = 0.94 + 0.06 * fract(sin(dot(floor(vCustomWorldPos.xz * 14.0), vec2(12.9898, 78.233))) * 43758.5453);
+                    diffuseColor.rgb *= grain * 0.90;
                 } else if (uIsBuilding < 0.5) {
                     float windGust = sin(vCustomWorldPos.x * 0.11 + vCustomWorldPos.z * 0.08 + uTime * 2.6) * 
                                      cos(vCustomWorldPos.x * 0.05 - vCustomWorldPos.z * 0.10 + uTime * 1.8);
-                    diffuseColor.rgb *= (0.95 + 0.05 * windGust);
+                    diffuseColor.rgb *= (0.96 + 0.04 * windGust);
                 }
 
                 // 5. Layered Organic Zerg Creep Network (Connects Hive, Spawning Pool, Bio-Factory, Spine Turrets & Creep Tumors!)
@@ -2298,9 +2509,9 @@ const SHADER_ENGINE = {
                         float pulseWave = 0.5 + 0.5 * sin(uTime * 1.8 - length(toMain) * 0.35);
 
                         // Deep purple & muted burgundy biological matter palette
-                        vec3 deepBurgundy = vec3(0.16, 0.035, 0.14);
-                        vec3 darkPurpleTissue = vec3(0.26, 0.065, 0.28);
-                        vec3 biolumVein = mix(vec3(0.46, 0.10, 0.34), vec3(0.58, 0.14, 0.48), pulseWave);
+                        vec3 deepBurgundy = vec3(0.18, 0.045, 0.16);
+                        vec3 darkPurpleTissue = vec3(0.28, 0.075, 0.30);
+                        vec3 biolumVein = mix(vec3(0.48, 0.12, 0.36), vec3(0.60, 0.16, 0.50), pulseWave);
 
                         float tissueFold = smoothstep(-0.6, 0.8, sin(warpedCoords.x * 0.55 + bioWarp.y));
                         vec3 baseTissue = mix(deepBurgundy, darkPurpleTissue, tissueFold);
@@ -2312,7 +2523,7 @@ const SHADER_ENGINE = {
                         float rootTendril = smoothstep(0.45, 0.92, 1.0 - abs(sin(ang * 18.0 + warpedCoords.x * 0.8)));
                         float edgeFeather = clamp(interiorMask + rootTendril * smoothstep(1.6, -0.5, effSignedDist) * (1.0 - interiorMask) * 0.65, 0.0, 1.0);
 
-                        diffuseColor.rgb = mix(diffuseColor.rgb, organicCreep, edgeFeather * 0.94);
+                        diffuseColor.rgb = mix(diffuseColor.rgb, organicCreep, edgeFeather * 0.92);
                         creepWetnessBoost = edgeFeather * (0.62 + vascularNetwork * 0.18);
                     }
                 }`
@@ -2337,18 +2548,23 @@ const SHADER_ENGINE = {
             ).replace(
                 '#include <emissivemap_fragment>',
                 `#include <emissivemap_fragment>
-                totalEmissiveRadiance *= clamp(0.45 + 0.55 * uSunLightFactor, 0.38, 1.0);
+                totalEmissiveRadiance *= clamp(0.55 + 0.45 * uSunLightFactor, 0.50, 1.0);
+                if (lavaFissureGlow > 0.01) {
+                    totalEmissiveRadiance += vec3(1.0, 0.36, 0.04) * (lavaFissureGlow * 0.65);
+                }
                 if (uHasFow > 0.5 && uTitleScreen < 0.5) {
                     vec2 eFowUv = vec2((vCustomWorldPos.x / uMapSize) + 0.5, 0.5 - (vCustomWorldPos.z / uMapSize));
                     if (eFowUv.x >= 0.0 && eFowUv.x <= 1.0 && eFowUv.y >= 0.0 && eFowUv.y <= 1.0) {
                         float eFa = texture2D(uFowMap, eFowUv).a;
-                        totalEmissiveRadiance *= (1.0 - smoothstep(0.05, 0.75, eFa) * 0.96);
+                        // Keep lava fissures & emissive terrain clearly visible (retain >= 72% emissive radiance in fog)
+                        totalEmissiveRadiance *= (1.0 - smoothstep(0.10, 0.85, eFa) * 0.28);
                     }
                 }`
             ).replace(
                 '#include <dithering_fragment>',
                 `#include <dithering_fragment>
-                // 6. Texture-Preserving Fog of War Intensity Shader (Applies to terrain, Zerg creep, and structures; bypassed in 3D Portrait Viewer via setPortraitRenderPass)
+                // 6. Color-Preserving Fog of War Overlay (Separates base biome terrain color from atmospheric FOW tint;
+                //    visible areas = 100% biome color, explored areas = 82% brightness, unexplored areas = recognizable biome color + subtle slate mist)
                 if (uHasFow > 0.5 && uTitleScreen < 0.5) {
                     vec2 fowUv = vec2((vCustomWorldPos.x / uMapSize) + 0.5, 0.5 - (vCustomWorldPos.z / uMapSize));
                     if (fowUv.x >= 0.0 && fowUv.x <= 1.0 && fowUv.y >= 0.0 && fowUv.y <= 1.0) {
@@ -2358,15 +2574,19 @@ const SHADER_ENGINE = {
                                  + texture2D(uFowMap, fowUv - vec2(tStep.x, 0.0)).a * 0.15
                                  + texture2D(uFowMap, fowUv + vec2(0.0, tStep.y)).a * 0.15
                                  + texture2D(uFowMap, fowUv - vec2(0.0, tStep.y)).a * 0.15;
-                        float fowIntensity = smoothstep(0.03, 0.97, fA);
-                        float texLuma = dot(gl_FragColor.rgb, vec3(0.299, 0.587, 0.114));
-                        vec3 moonlitTex = mix(gl_FragColor.rgb, vec3(texLuma) * vec3(0.55, 0.68, 0.86), 0.65);
-                        vec3 exploredBlend = moonlitTex * (uIsBuilding > 0.5 ? 0.38 : 0.44);
-                        vec3 unexploredBlend = mix(moonlitTex * 0.10, vec3(0.018, 0.028, 0.048), 0.88);
-                        vec3 targetFowCol = mix(exploredBlend, unexploredBlend, smoothstep(0.40, 0.86, fowIntensity));
+                        float fowIntensity = smoothstep(0.04, 0.92, fA);
+                        vec3 baseCol = gl_FragColor.rgb;
+                        float texLuma = dot(baseCol, vec3(0.299, 0.587, 0.114));
+                        vec3 coolTint = mix(baseCol, vec3(texLuma) * vec3(0.76, 0.86, 0.98), 0.24);
+                        vec3 exploredCol = coolTint * (uIsBuilding > 0.5 ? 0.78 : 0.82);
+                        vec3 fogAtmosphere = vec3(0.18, 0.25, 0.35);
+                        vec3 unexploredCol = mix(coolTint * 0.64, fogAtmosphere, 0.34);
+                        vec3 targetFowCol = mix(exploredCol, unexploredCol, smoothstep(0.42, 0.84, fowIntensity));
                         float visionEdge = 4.0 * fowIntensity * (1.0 - fowIntensity);
-                        targetFowCol += vec3(0.025, 0.055, 0.10) * visionEdge * (0.4 + 0.6 * texLuma);
-                        gl_FragColor.rgb = mix(gl_FragColor.rgb, targetFowCol, clamp(fowIntensity * 0.94, 0.0, 0.94));
+                        targetFowCol += vec3(0.03, 0.06, 0.11) * visionEdge * (0.4 + 0.6 * texLuma);
+                        // Preserve lava fissure emissive glow even in unexplored areas
+                        float fowMixWeight = clamp(fowIntensity * (1.0 - lavaFissureGlow * 0.70), 0.0, 0.72);
+                        gl_FragColor.rgb = mix(baseCol, targetFowCol, fowMixWeight);
                     }
                 }`
             );

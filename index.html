@@ -48,6 +48,9 @@
         <button id="btn-restore-console" class="floating-hud-pill console-restore-pill" onclick="window.toggleBottomConsole && window.toggleBottomConsole()">
           ▲ BUILD / COMMANDS
         </button>
+        <button id="btn-restore-debug" class="floating-hud-pill" onclick="window.toggleStarblockDebugMode && window.toggleStarblockDebugMode()" title="Open Live AI &amp; Graphics Debug Panel [F8 / F9]">
+          🐞 DEBUG
+        </button>
       </div>
 
       <!-- StarCraft II Terran Top Menu, Objective & Resource HUD -->
@@ -67,6 +70,9 @@
             </button>
             <button class="sc2-endless-btn" id="btn-hud-settings" onclick="window.toggleHudSettingsModal && window.toggleHudSettingsModal()" title="Open Tactical HUD, AI & Audio Settings">
               ⚙ SETTINGS
+            </button>
+            <button class="sc2-endless-btn" id="btn-debug-mode" onclick="window.toggleStarblockDebugMode && window.toggleStarblockDebugMode()" title="Open Live AI &amp; Graphics Debug Panel [F8 / F9]" style="border-color: rgba(56,189,248,0.55); color: #7dd3fc;">
+              🐞 DEBUG
             </button>
           </div>
           <div id="sc2-objective-pill">

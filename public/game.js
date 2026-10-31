@@ -456,6 +456,7 @@ function updateFogOfWarVision() {
 
     // Build spatial vision signature so we can skip full canvas uploads when units are stationary and alpha has settled
     let sig = revealAll ? 777777 : Math.round(weatherVisMult * 100);
+    sig = (sig * 31 + Math.round(PLAYER_START_POS.x) * 19 + Math.round(PLAYER_START_POS.z) * 23 + (state.basePlaced ? 101 : 37) + (state.solarisHostile ? 71 : 13)) | 0;
     if (state.basePlaced) {
         sig = (sig * 31 + buildings.length * 17 + units.length * 13) | 0;
         for (let i = 0; i < units.length; i++) {
@@ -470,6 +471,12 @@ function updateFogOfWarVision() {
                 sig = (sig + ((Math.round(b.pos.x) * 83492791) ^ (Math.round(b.pos.z) * 2971215073))) | 0;
             }
         }
+    }
+
+    if (window._forceFowReset) {
+        window._forceFowReset = false;
+        _fowFirstPassDone = false;
+        _fowLastSig = 0;
     }
 
     const canReuseVisionGrid = (_fowFirstPassDone && sig === _fowLastSig && _fowSkipStreak < 2 && !revealAll);
@@ -488,9 +495,9 @@ function updateFogOfWarVision() {
         fowSmoothAlpha.fill(0);
         for (let idx = 0, total = FOW_RES * FOW_RES; idx < total; idx++) {
             const p = idx * 4;
-            data[p] = 6;
-            data[p + 1] = 11;
-            data[p + 2] = 18;
+            data[p] = 14;
+            data[p + 1] = 22;
+            data[p + 2] = 34;
             data[p + 3] = 0;
         }
         fowCtx.putImageData(fowImgData, 0, 0);
@@ -528,24 +535,25 @@ function updateFogOfWarVision() {
                 }
             };
 
+            // Always guarantee starting drop-zone vision around PLAYER_START_POS so initial camera view is revealed
+            stampVisionCircle(PLAYER_START_POS.x, PLAYER_START_POS.z, (state.basePlaced ? 32 : 40) * weatherVisMult);
             if (!state.basePlaced) {
-                stampVisionCircle(PLAYER_START_POS.x, PLAYER_START_POS.z, 38 * weatherVisMult);
                 if (typeof SOLARIS_BASE_POS !== 'undefined') {
-                    stampVisionCircle(SOLARIS_BASE_POS.x, SOLARIS_BASE_POS.z, 24 * weatherVisMult);
+                    stampVisionCircle(SOLARIS_BASE_POS.x, SOLARIS_BASE_POS.z, 25 * weatherVisMult);
                 }
             } else {
                 for (let i = 0; i < buildings.length; i++) {
                     const b = buildings[i];
-                    if (b && b.hp > 0) stampVisionCircle(b.pos.x, b.pos.z, (b.type === 'base' ? 36 : 24) * weatherVisMult);
+                    if (b && b.hp > 0) stampVisionCircle(b.pos.x, b.pos.z, (b.type === 'base' ? 38 : 25) * weatherVisMult);
                 }
                 for (let i = 0; i < units.length; i++) {
                     const u = units[i];
-                    if (u && u.hp > 0) stampVisionCircle(u.mesh.position.x, u.mesh.position.z, (u.isAir ? 26 : 18.5) * weatherVisMult);
+                    if (u && u.hp > 0) stampVisionCircle(u.mesh.position.x, u.mesh.position.z, (u.isAir ? 26 : 19.0) * weatherVisMult);
                 }
                 if (!state.solarisHostile) {
                     for (let i = 0; i < solarisBuildings.length; i++) {
                         const sb = solarisBuildings[i];
-                        if (sb && sb.hp > 0) stampVisionCircle(sb.pos.x, sb.pos.z, 24 * weatherVisMult);
+                        if (sb && sb.hp > 0) stampVisionCircle(sb.pos.x, sb.pos.z, 25 * weatherVisMult);
                     }
                 }
             }
@@ -559,31 +567,31 @@ function updateFogOfWarVision() {
         const totalCells = FOW_RES * FOW_RES;
         for (let idx = 0; idx < totalCells; idx++) {
             const minRatioSq = _fowMinRatioSqGrid[idx];
-            let targetAlpha = 212;
+            let targetAlpha = 195;
             if (minRatioSq < 1.0) {
                 fowExplored[idx] = 1;
                 fowVisible[idx] = 1;
-                if (minRatioSq < 0.3844) { // 0.62^2
+                if (minRatioSq < 0.4096) { // 0.64^2
                     targetAlpha = 0;
                 } else {
                     const minRatio = Math.sqrt(minRatioSq);
-                    const edgeT = (minRatio - 0.62) / 0.38;
-                    targetAlpha = Math.floor(edgeT * edgeT * (3.0 - 2.0 * edgeT) * 116);
+                    const edgeT = (minRatio - 0.64) / 0.36;
+                    targetAlpha = Math.floor(edgeT * edgeT * (3.0 - 2.0 * edgeT) * 96);
                 }
             } else if (fowExplored[idx]) {
-                targetAlpha = 116;
+                targetAlpha = 96;
             }
 
             const prevSmooth = fowSmoothAlpha[idx];
             const nextSmooth = prevSmooth + (targetAlpha - prevSmooth) * lerpRate;
             fowSmoothAlpha[idx] = nextSmooth;
-            if (Math.abs(nextSmooth - prevSmooth) > 0.35) anyAlphaChanged = true;
+            if (Math.abs(nextSmooth - prevSmooth) > 0.30) anyAlphaChanged = true;
             const alpha = Math.max(0, Math.min(255, (nextSmooth + 0.5) | 0));
 
             const p = idx * 4;
-            data[p] = 6;
-            data[p + 1] = 11;
-            data[p + 2] = 18;
+            data[p] = 14;
+            data[p + 1] = 22;
+            data[p + 2] = 34;
             data[p + 3] = alpha;
         }
 
@@ -3963,6 +3971,24 @@ window.addEventListener('pointerup', e => {
         return;
     }
 
+    // When Debug Mode UI is open, clicking or tapping a Zerg enemy unit in the 3D scene selects it in the Debug Unit Inspector!
+    if (window.AI_DEBUG && window.AI_DEBUG.enabled && enemies.length > 0 && cursorWorldPos) {
+        let bestDbgEnemy = null;
+        let bestDbgDist = 2.4;
+        for (let ei = 0; ei < enemies.length; ei++) {
+            const en = enemies[ei];
+            if (!en || en.hp <= 0 || !en.mesh) continue;
+            const dE = Math.hypot(en.mesh.position.x - cursorWorldPos.x, en.mesh.position.z - cursorWorldPos.z);
+            if (dE < bestDbgDist) {
+                bestDbgDist = dE;
+                bestDbgEnemy = en;
+            }
+        }
+        if (bestDbgEnemy) {
+            window.AI_DEBUG.selectUnit(bestDbgEnemy.id);
+        }
+    }
+
     // Desktop only: single click on a friendly unit selects it (Mobile requires Hold to select units!)
     if (!isTouchPointer) {
         const unitMeshes = units.map(u => u.mesh);
@@ -5588,7 +5614,11 @@ function spawnEnemyFromBuilding(variant, originPos, sourceBuilding = null) {
     const flankSide = (enemies.length % 2 === 0 ? 1 : -1);
     const isMelee = baseStats.rng <= 2.5;
 
+    window._zergUnitSeq = (window._zergUnitSeq || 0) + 1;
+    const assignedId = `zerg_${variant}_${window._zergUnitSeq}`;
+
     const enemyObj = {
+        id: assignedId,
         faction: 'zerg',
         variant, isAir, isMelee, radius: baseStats.rad, mesh, hb,
         baseMaxHp: Math.round(baseStats.hp * mult),
@@ -5597,6 +5627,7 @@ function spawnEnemyFromBuilding(variant, originPos, sourceBuilding = null) {
         damage: finalEnemyDmg,
         armorBonus: (zergUpg.armor || 0) * 2,
         speed: baseStats.spd,
+        actualSpeedPerSec: 0,
         range: baseStats.rng,
         fireRate: baseStats.rate,
         reward: baseStats.reward,
@@ -5608,20 +5639,32 @@ function spawnEnemyFromBuilding(variant, originPos, sourceBuilding = null) {
         // 'SPAWNING' | 'IDLE' | 'MOVING' | 'ATTACKING' | 'RETREATING' | 'SEARCHING' | 'DEAD'
         aiState: 'SPAWNING',
         aiPrevState: null,
-        aiStateTimer: 0.30,
+        aiStateTimer: 0.25,
         // Initial combat order & rally point toward nearest hostile base/army
         order: 'attack_move',
         rallyPos: new THREE.Vector3(rallyX, surfFn(rallyX, rallyZ), rallyZ),
+        currentDestination: { x: Number(rallyX.toFixed(2)), z: Number(rallyZ.toFixed(2)) },
+        navWaypoint: { x: Number(rallyX.toFixed(2)), z: Number(rallyZ.toFixed(2)) },
+        navSuccess: true,
+        walkableAtPos: !isAir ? Boolean(typeof isWalkableGround === 'function' ? isWalkableGround(sx, sz, baseStats.rad * 0.45) : true) : true,
+        stopReason: 'none',
         // Target lock hysteresis (prevents switching targets every frame)
         lockedTarget: null,
         lockedTargetIsBuilding: false,
         targetLockTimer: 0,
-        // Combat Watchdog (detects units that haven't moved or attacked for a configurable period)
+        // Combat Watchdog (detects units that haven't moved or attacked or walk in circles)
         watchdogTimer: 0,
-        watchdogPeriod: 2.4,
+        watchdogPeriod: 2.0,
         lastCombatActionTime: state.elapsedSec || 0,
+        lastMoveTime: state.elapsedSec || 0,
+        lastAttackTime: 0,
         lastActionPos: new THREE.Vector3(sx, groundH, sz),
+        _posHistory: [{ x: sx, z: sz, t: state.elapsedSec || 0 }],
+        _posSampleTimer: 0,
         recoveryAttempts: 0,
+        recoveryDetourPos: null,
+        recoveryDetourTimer: 0,
+        lastStuckPos: null,
         stuckTimer: 0,
         lastProgressPos: new THREE.Vector3(sx, groundH, sz),
         flankSign: flankSide,
@@ -5635,6 +5678,9 @@ function spawnEnemyFromBuilding(variant, originPos, sourceBuilding = null) {
         window.applyUnitUpgradeVisuals(enemyObj, zergUpg.weapons || 0, zergUpg.armor || 0, 'zerg');
     }
     enemies.push(enemyObj);
+    if (window.AI_DEBUG && window.AI_DEBUG.loggingEnabled) {
+        window.AI_DEBUG.logEvent(`Spawned ${assignedId} (${variant}) at (${sx.toFixed(1)}, ${sz.toFixed(1)}) -> rally (${rallyX.toFixed(1)}, ${rallyZ.toFixed(1)})`);
+    }
     return enemyObj;
 }
 
@@ -6657,43 +6703,393 @@ window.SQUAD_MANAGER = {
 
 window.AI_DEBUG = {
     enabled: false,
+    worldVizEnabled: true,
+    loggingEnabled: true,
+    showGraphicsPanel: false,
+    selectedUnitId: null,
+    logHistory: [],
+    lastSimTestResult: null,
     group: null,
-    hudEl: null,
+    panelEl: null,
+    _vizPool: {
+        lines: [],
+        markers: [],
+        matValidLine: null,
+        matBlockedLine: null,
+        matDestMarker: null,
+        matTargetMarker: null,
+        matStuckMarker: null,
+        markerGeo: null
+    },
+    logEvent(msg) {
+        if (!this.loggingEnabled) return;
+        const ts = (state && typeof state.elapsedSec === 'number') ? state.elapsedSec.toFixed(2) : '0.00';
+        this.logHistory.push(`[${ts}s] ${msg}`);
+        if (this.logHistory.length > 80) this.logHistory.shift();
+    },
+    clearHistory() {
+        this.logHistory.length = 0;
+        for (let i = 0; i < enemies.length; i++) {
+            enemies[i].lastError = null;
+            enemies[i].lastStuckPos = null;
+        }
+        if (typeof NAV_STUCK_HOTSPOTS !== 'undefined') {
+            NAV_STUCK_HOTSPOTS.length = 0;
+        }
+        this.logEvent('Diagnostic history & stuck hotspots cleared.');
+        this.renderUI(true);
+    },
+    selectUnit(unitId) {
+        this.selectedUnitId = unitId;
+        this.renderUI(true);
+    },
+    toggleWorldViz() {
+        this.worldVizEnabled = !this.worldVizEnabled;
+        if (this.group) this.group.visible = this.enabled && this.worldVizEnabled;
+        this.renderUI(true);
+    },
+    toggleLogging() {
+        this.loggingEnabled = !this.loggingEnabled;
+        this.renderUI(true);
+    },
+    toggleGraphicsPanel() {
+        this.showGraphicsPanel = !this.showGraphicsPanel;
+        this.renderUI(true);
+    },
+    exportReport() {
+        const fullReport = {
+            exportedAt: new Date().toISOString(),
+            aiDiagnostics: window.ZERG_AI_DIAGNOSTICS ? window.ZERG_AI_DIAGNOSTICS.getReport() : {},
+            graphicsDiagnostics: window.GRAPHICS_DIAGNOSTICS ? window.GRAPHICS_DIAGNOSTICS.getSnapshot() : {},
+            lastSimTestResult: this.lastSimTestResult,
+            logHistory: this.logHistory.slice()
+        };
+        const jsonStr = JSON.stringify(fullReport, null, 2);
+        try {
+            const blob = new Blob([jsonStr], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `starblock-diagnostics-${Date.now()}.json`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 2500);
+        } catch (_) {}
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(jsonStr).catch(() => {});
+        }
+        this.logEvent('Exported full JSON diagnostic report.');
+        this.renderUI(true);
+        return fullReport;
+    },
     toggle() {
         this.enabled = !this.enabled;
-        if (!this.enabled && this.group) {
-            this.group.visible = false;
+        this._ensureDOM();
+        if (this.panelEl) {
+            this.panelEl.style.display = this.enabled ? 'flex' : 'none';
         }
-        if (this.hudEl) {
-            this.hudEl.style.display = this.enabled ? 'block' : 'none';
+        if (this.group) {
+            this.group.visible = this.enabled && this.worldVizEnabled;
+        }
+        const topBtn = document.getElementById('btn-debug-mode');
+        if (topBtn) {
+            topBtn.style.borderColor = this.enabled ? '#00ff9d' : '';
+            topBtn.style.color = this.enabled ? '#00ff9d' : '';
+        }
+        if (this.enabled) {
+            this.renderUI(true);
         }
     },
-    update(dt) {
-        if (!this.enabled || typeof THREE === 'undefined' || !scene) return;
+    _ensureDOM() {
+        if (this.panelEl) return;
+        const panel = document.createElement('div');
+        panel.id = 'starblock-debug-panel';
+        panel.style.cssText = [
+            'position:fixed',
+            'top:44px',
+            'right:10px',
+            'width:min(430px, 95vw)',
+            'max-height:calc(100vh - 60px)',
+            'z-index:9998',
+            'background:rgba(5, 11, 20, 0.94)',
+            'border:1px solid #00e5ff',
+            'border-radius:8px',
+            'box-shadow:0 10px 32px rgba(0,0,0,0.8)',
+            'color:#e2f1ff',
+            'font:11px/1.38 monospace',
+            'display:none',
+            'flex-direction:column',
+            'overflow:hidden',
+            'pointer-events:auto'
+        ].join(';');
+
+        panel.innerHTML = `
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:7px 10px;background:rgba(0,229,255,0.14);border-bottom:1px solid rgba(0,229,255,0.35);">
+                <span style="font-weight:700;color:#00f0ff;letter-spacing:0.5px;">🐞 STARBLOCK LIVE AI &amp; ENGINE DEBUG [F8/F9]</span>
+                <button id="dbg-btn-close" style="background:#1e293b;color:#f87171;border:1px solid #f87171;border-radius:4px;padding:2px 7px;cursor:pointer;font:11px monospace;">✕</button>
+            </div>
+            <div style="display:flex;flex-wrap:wrap;gap:4px;padding:6px 8px;background:rgba(15,23,42,0.9);border-bottom:1px solid rgba(148,163,184,0.2);">
+                <button id="dbg-btn-viz" style="flex:1 1 30%;background:#0f172a;color:#34d399;border:1px solid #34d399;border-radius:4px;padding:4px 6px;cursor:pointer;font:10px monospace;">3D VIZ: ON</button>
+                <button id="dbg-btn-log" style="flex:1 1 30%;background:#0f172a;color:#38bdf8;border:1px solid #38bdf8;border-radius:4px;padding:4px 6px;cursor:pointer;font:10px monospace;">LOG: ON</button>
+                <button id="dbg-btn-gfx" style="flex:1 1 30%;background:#0f172a;color:#c084fc;border:1px solid #c084fc;border-radius:4px;padding:4px 6px;cursor:pointer;font:10px monospace;">GFX DIAG</button>
+                <button id="dbg-btn-sim" style="flex:1 1 32%;background:#064e3b;color:#6ee7b7;border:1px solid #10b981;border-radius:4px;padding:4px 6px;cursor:pointer;font:10px monospace;font-weight:700;">▶ RUN ZERG SIM TEST</button>
+                <button id="dbg-btn-clear" style="flex:1 1 28%;background:#0f172a;color:#fbbf24;border:1px solid #fbbf24;border-radius:4px;padding:4px 6px;cursor:pointer;font:10px monospace;">CLEAR</button>
+                <button id="dbg-btn-export" style="flex:1 1 30%;background:#0f172a;color:#e2e8f0;border:1px solid #94a3b8;border-radius:4px;padding:4px 6px;cursor:pointer;font:10px monospace;">EXPORT JSON</button>
+            </div>
+            <div style="padding:6px 10px;font-size:10px;color:#94a3b8;background:rgba(2,6,14,0.7);border-bottom:1px solid rgba(148,163,184,0.16);">
+                Legend: <span style="color:#22c55e;">■ Green=Valid Path</span> · <span style="color:#ef4444;">■ Red=Blocked/Stuck</span> · <span style="color:#eab308;">● Yellow=Dest</span> · <span style="color:#3b82f6;">● Blue=Target</span>
+            </div>
+            <div id="dbg-panel-body" style="padding:8px 10px;overflow-y:auto;max-height:calc(100vh - 170px);display:flex;flex-direction:column;gap:8px;"></div>
+        `;
+        panel.addEventListener('pointerdown', ev => ev.stopPropagation());
+        panel.addEventListener('pointerup', ev => ev.stopPropagation());
+        panel.addEventListener('wheel', ev => ev.stopPropagation());
+        document.body.appendChild(panel);
+        this.panelEl = panel;
+
+        document.getElementById('dbg-btn-close').onclick = () => this.toggle();
+        document.getElementById('dbg-btn-viz').onclick = () => this.toggleWorldViz();
+        document.getElementById('dbg-btn-log').onclick = () => this.toggleLogging();
+        document.getElementById('dbg-btn-gfx').onclick = () => this.toggleGraphicsPanel();
+        document.getElementById('dbg-btn-clear').onclick = () => this.clearHistory();
+        document.getElementById('dbg-btn-export').onclick = () => this.exportReport();
+        document.getElementById('dbg-btn-sim').onclick = () => {
+            if (typeof window.runZergMovementSimulationTest === 'function') {
+                window.runZergMovementSimulationTest();
+            }
+        };
+    },
+    _updateWorldViz() {
+        if (!this.enabled || !this.worldVizEnabled || typeof THREE === 'undefined' || !scene) {
+            if (this.group) this.group.visible = false;
+            return;
+        }
         if (!this.group) {
             this.group = new THREE.Group();
             this.group.name = 'AIDebugOverlayGroup';
             scene.add(this.group);
+            this._vizPool.matValidLine = new THREE.LineBasicMaterial({ color: 0x22c55e, depthTest: false, transparent: true, opacity: 0.92 });
+            this._vizPool.matBlockedLine = new THREE.LineBasicMaterial({ color: 0xef4444, depthTest: false, transparent: true, opacity: 0.95 });
+            this._vizPool.matDestMarker = new THREE.MeshBasicMaterial({ color: 0xeab308, depthTest: false, transparent: true, opacity: 0.90 });
+            this._vizPool.matTargetMarker = new THREE.MeshBasicMaterial({ color: 0x3b82f6, depthTest: false, transparent: true, opacity: 0.90 });
+            this._vizPool.matStuckMarker = new THREE.MeshBasicMaterial({ color: 0xef4444, depthTest: false, transparent: true, opacity: 0.92 });
+            this._vizPool.markerGeo = new THREE.OctahedronGeometry(0.45, 0);
         }
         this.group.visible = true;
-        if (!this.hudEl) {
-            this.hudEl = document.createElement('div');
-            this.hudEl.style.cssText = 'position:fixed;top:64px;left:14px;z-index:9999;background:rgba(6,12,22,0.86);border:1px solid #00f0ff;color:#aef;font:11px monospace;padding:8px 10px;border-radius:6px;pointer-events:none;max-width:310px;';
-            document.body.appendChild(this.hudEl);
+
+        const pool = this._vizPool;
+        let lineIdx = 0;
+        let markerIdx = 0;
+        const surfFn = typeof getSurfaceHeightWithBridges === 'function' ? getSurfaceHeightWithBridges : getTerrainHeight;
+
+        const addDebugLine = (p1x, p1y, p1z, p2x, p2y, p2z, isBlocked) => {
+            let line = pool.lines[lineIdx++];
+            if (!line) {
+                const geo = new THREE.BufferGeometry();
+                geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
+                line = new THREE.Line(geo, pool.matValidLine);
+                line.renderOrder = 999;
+                pool.lines.push(line);
+                this.group.add(line);
+            }
+            line.visible = true;
+            line.material = isBlocked ? pool.matBlockedLine : pool.matValidLine;
+            const posAttr = line.geometry.attributes.position;
+            posAttr.setXYZ(0, p1x, p1y, p1z);
+            posAttr.setXYZ(1, p2x, p2y, p2z);
+            posAttr.needsUpdate = true;
+        };
+
+        const addDebugMarker = (wx, wy, wz, mat, scale = 1.0) => {
+            let mk = pool.markers[markerIdx++];
+            if (!mk) {
+                mk = new THREE.Mesh(pool.markerGeo, mat);
+                mk.renderOrder = 999;
+                pool.markers.push(mk);
+                this.group.add(mk);
+            }
+            mk.visible = true;
+            mk.material = mat;
+            mk.position.set(wx, wy, wz);
+            mk.scale.setScalar(scale);
+        };
+
+        for (let i = 0; i < enemies.length; i++) {
+            const e = enemies[i];
+            if (!e || e.hp <= 0 || !e.mesh) continue;
+            const ux = e.mesh.position.x;
+            const uy = e.mesh.position.y + 0.55;
+            const uz = e.mesh.position.z;
+            const isSelected = (this.selectedUnitId && e.id === this.selectedUnitId);
+            const isBlocked = !e.navSuccess || (e.stuckTimer || 0) > 0.25 || e.lastNavResult === 'blocked';
+
+            // 1. Path line to navWaypoint and destination (Green = valid, Red = blocked)
+            const wp = e.navWaypoint || e.currentDestination;
+            if (wp && Number.isFinite(wp.x) && Number.isFinite(wp.z)) {
+                const wy = surfFn(wp.x, wp.z) + 0.55;
+                addDebugLine(ux, uy, uz, wp.x, wy, wp.z, isBlocked);
+                if (e.currentDestination && (Math.abs(wp.x - e.currentDestination.x) > 0.5 || Math.abs(wp.z - e.currentDestination.z) > 0.5)) {
+                    const dy = surfFn(e.currentDestination.x, e.currentDestination.z) + 0.55;
+                    addDebugLine(wp.x, wy, wp.z, e.currentDestination.x, dy, e.currentDestination.z, isBlocked);
+                }
+            }
+
+            // 2. Yellow marker: current destination
+            if (e.currentDestination && Number.isFinite(e.currentDestination.x) && Number.isFinite(e.currentDestination.z)) {
+                const dy = surfFn(e.currentDestination.x, e.currentDestination.z) + 0.75;
+                addDebugMarker(e.currentDestination.x, dy, e.currentDestination.z, pool.matDestMarker, isSelected ? 1.45 : 0.85);
+            }
+
+            // 3. Blue marker: selected target
+            if (e.lockedTarget) {
+                const lt = e.lockedTarget;
+                const ltPos = lt.mesh ? lt.mesh.position : lt.pos;
+                if (ltPos && Number.isFinite(ltPos.x) && Number.isFinite(ltPos.z)) {
+                    const ty = (ltPos.y || surfFn(ltPos.x, ltPos.z)) + 1.35;
+                    addDebugMarker(ltPos.x, ty, ltPos.z, pool.matTargetMarker, isSelected ? 1.55 : 0.95);
+                }
+            }
+
+            // 4. Red marker: stuck location
+            if (e.lastStuckPos && Number.isFinite(e.lastStuckPos.x) && Number.isFinite(e.lastStuckPos.z)) {
+                const sy = surfFn(e.lastStuckPos.x, e.lastStuckPos.z) + 0.95;
+                addDebugMarker(e.lastStuckPos.x, sy, e.lastStuckPos.z, pool.matStuckMarker, 1.15);
+            }
         }
-        const brStates = (window.BRIDGE_TRAFFIC_MANAGER && window.BRIDGE_TRAFFIC_MANAGER.bridges)
-            ? window.BRIDGE_TRAFFIC_MANAGER.bridges.map(b => `B${b.id}:${b.direction}(occ:${b.occupants.size},qS:${b.queueSouth.length},qN:${b.queueNorth.length})`).join(' | ')
-            : 'N/A';
-        const strat = window.STRATEGIC_COMMANDER ? window.STRATEGIC_COMMANDER.currentStrategy : 'auto';
-        let stuckCount = 0;
-        for (let i = 0; i < units.length; i++) if ((units[i].stuckTimer || 0) > 0.25) stuckCount++;
-        for (let i = 0; i < enemies.length; i++) if ((enemies[i].stuckTimer || 0) > 0.25) stuckCount++;
-        this.hudEl.innerHTML = `<b>[F8] RTS AI DEBUG</b><br>Commander: <b>${strat.toUpperCase()}</b><br>Bridges: ${brStates}<br>Units: ${units.length} | Enemies: ${enemies.length} | Unsticking: ${stuckCount}`;
+
+        for (let i = lineIdx; i < pool.lines.length; i++) pool.lines[i].visible = false;
+        for (let i = markerIdx; i < pool.markers.length; i++) pool.markers[i].visible = false;
+    },
+    _lastUiRenderMs: 0,
+    renderUI(force = false) {
+        if (!this.enabled) return;
+        const nowMs = performance.now();
+        if (!force && nowMs - this._lastUiRenderMs < 240) return;
+        this._lastUiRenderMs = nowMs;
+
+        this._ensureDOM();
+        const body = document.getElementById('dbg-panel-body');
+        if (!body) return;
+
+        const btnViz = document.getElementById('dbg-btn-viz');
+        if (btnViz) btnViz.innerText = `3D VIZ: ${this.worldVizEnabled ? 'ON' : 'OFF'}`;
+        const btnLog = document.getElementById('dbg-btn-log');
+        if (btnLog) btnLog.innerText = `LOG: ${this.loggingEnabled ? 'ON' : 'OFF'}`;
+        const btnGfx = document.getElementById('dbg-btn-gfx');
+        if (btnGfx) btnGfx.style.background = this.showGraphicsPanel ? '#3b0764' : '#0f172a';
+
+        const aiRep = window.ZERG_AI_DIAGNOSTICS ? window.ZERG_AI_DIAGNOSTICS.getReport() : {
+            totalZergUnits: enemies.length,
+            movingCount: 0,
+            attackingCount: 0,
+            searchingCount: 0,
+            stuckCount: 0,
+            recoveringCount: 0,
+            units: []
+        };
+
+        if (!this.selectedUnitId && aiRep.units.length > 0) {
+            this.selectedUnitId = aiRep.units[0].unitId;
+        }
+        let selUnit = aiRep.units.find(u => u.unitId === this.selectedUnitId) || aiRep.units[0] || null;
+
+        let gfxHtml = '';
+        if (this.showGraphicsPanel && window.GRAPHICS_DIAGNOSTICS) {
+            const g = window.GRAPHICS_DIAGNOSTICS.getSnapshot();
+            const ctxCol = g.contextStatus === 'ACTIVE' ? '#22c55e' : (g.contextStatus === 'RESTORED' ? '#38bdf8' : '#ef4444');
+            const injErrs = g.shaderValidation.failedInjections.length;
+            const compErrs = g.shaderValidation.compilationErrors.length;
+            gfxHtml = `
+                <div style="background:rgba(30,18,52,0.75);border:1px solid #a855f7;border-radius:6px;padding:7px 9px;">
+                    <div style="font-weight:700;color:#d8b4fe;margin-bottom:4px;">GRAPHICS &amp; WEBGL DIAGNOSTICS</div>
+                    <div>Context Status: <b style="color:${ctxCol};">${g.contextStatus}</b> (Losses: ${g.contextLossCount}, Restores: ${g.contextRestoreCount})</div>
+                    <div>GPU Renderer: <span style="color:#cbd5e1;">${g.rendererInfo.renderer}</span></div>
+                    <div>FPS / Frame: <b>${g.fps} FPS</b> (${g.frameTimeMs} ms) | Quality: <b>${g.qualityTier}</b> | DPR: <b>${g.devicePixelRatio}</b></div>
+                    <div>Draw Calls: <b>${g.drawCalls}</b> | Tris: <b>${g.triangles}</b> | Geoms: <b>${g.geometries}</b> | Tex: <b>${g.textures}</b></div>
+                    <div>Shader Validated: <b>${g.shaderValidation.validatedCount}</b> | Failed Injections: <b style="color:${injErrs ? '#ef4444' : '#22c55e'};">${injErrs}</b> | Fallbacks: <b>${g.shaderValidation.fallbackMaterialsUsed}</b> | Compile Errors: <b style="color:${compErrs ? '#ef4444' : '#22c55e'};">${compErrs}</b></div>
+                </div>
+            `;
+        }
+
+        let simHtml = '';
+        if (this.lastSimTestResult) {
+            const sr = this.lastSimTestResult;
+            const sCol = sr.passed ? '#22c55e' : '#ef4444';
+            simHtml = `
+                <div style="background:rgba(6,40,30,0.75);border:1px solid ${sCol};border-radius:6px;padding:6px 9px;">
+                    <div style="font-weight:700;color:${sCol};">ZERG MOVEMENT SIMULATION TEST: ${sr.passed ? 'PASSED ✓' : 'FAILED ✕'}</div>
+                    <div>Tested Units: <b>${sr.testedCount}</b> | Moved &amp; Reached Valid Path: <b>${sr.passedCount}/${sr.testedCount}</b> | Avg Disp: <b>${sr.avgDisplacementM}m</b></div>
+                </div>
+            `;
+        }
+
+        const unitRows = aiRep.units.map(u => {
+            const isSel = selUnit && selUnit.unitId === u.unitId;
+            const stCol = u.aiState === 'ATTACKING' ? '#f87171' : (u.isStuck ? '#fbbf24' : '#34d399');
+            return `<div data-uid="${u.unitId}" class="dbg-unit-row" style="display:flex;justify-content:space-between;padding:3px 6px;border-radius:4px;cursor:pointer;background:${isSel ? 'rgba(0,229,255,0.22)' : 'rgba(15,23,42,0.65)'};border:1px solid ${isSel ? '#00e5ff' : 'transparent'};">
+                <span><b>${u.unitId}</b> (${u.unitType})</span>
+                <span style="color:${stCol};">${u.aiState} · ${u.actualSpeedPerSec}m/s</span>
+            </div>`;
+        }).join('');
+
+        const inspectorHtml = selUnit ? `
+            <div style="background:rgba(15,23,42,0.85);border:1px solid rgba(56,189,248,0.4);border-radius:6px;padding:7px 9px;">
+                <div style="font-weight:700;color:#38bdf8;margin-bottom:4px;">UNIT INSPECTOR: ${selUnit.unitId} (${selUnit.unitType.toUpperCase()})</div>
+                <div>AI State: <b>${selUnit.aiState}</b> | Position: <b>(${selUnit.position.x}, ${selUnit.position.z})</b></div>
+                <div>Target: <b>${selUnit.currentTarget}</b> @ <b>${selUnit.targetCoords ? `(${selUnit.targetCoords.x}, ${selUnit.targetCoords.z})` : 'N/A'}</b> (${selUnit.targetDistance ?? '-'}m)</div>
+                <div>Destination: <b>${selUnit.destination ? `(${selUnit.destination.x}, ${selUnit.destination.z})` : 'N/A'}</b> (Dist: ${selUnit.distanceToDestination ?? '-'}m)</div>
+                <div>Nav Waypoint: <b>${selUnit.navigationWaypoint ? `(${selUnit.navigationWaypoint.x}, ${selUnit.navigationWaypoint.z})` : 'N/A'}</b> | Nav Status: <b style="color:${selUnit.navigationSuccess ? '#22c55e' : '#ef4444'};">${selUnit.navigationSuccess ? 'SUCCESS' : 'FAILED'} (${selUnit.navigationResult})</b></div>
+                <div>Config Speed: <b>${selUnit.movementSpeed}m/s</b> | Actual Displacement/s: <b>${selUnit.actualSpeedPerSec}m/s</b></div>
+                <div>Stop Reason: <b>${selUnit.stopReason}</b> | Walkable Ground: <b style="color:${selUnit.terrainWalkable ? '#22c55e' : '#ef4444'};">${selUnit.terrainWalkable ? 'YES' : 'NO'}</b></div>
+                <div>Bridge Assigned: <b>${selUnit.bridgeAssignment}</b> | Recovery Attempts: <b>${selUnit.lastRecoveryAttempt}</b></div>
+                <div>Last Move: <b>${selUnit.lastSuccessfulMovementTime}s</b> | Last Attack: <b>${selUnit.lastSuccessfulAttackTime}s</b></div>
+                <div>Last JS Error: <span style="color:${selUnit.currentError ? '#f87171' : '#94a3b8'};">${selUnit.currentError || 'None'}</span></div>
+            </div>
+        ` : `<div style="color:#94a3b8;padding:6px;">No active Zerg units on battlefield. Click "▶ RUN ZERG SIM TEST" to spawn and verify units.</div>`;
+
+        const logsHtml = this.logHistory.length > 0
+            ? `<div style="background:rgba(2,6,14,0.85);border:1px solid rgba(148,163,184,0.2);border-radius:4px;padding:5px 7px;max-height:85px;overflow-y:auto;font-size:10px;color:#94a3b8;">${this.logHistory.slice(-12).reverse().join('<br>')}</div>`
+            : '';
+
+        body.innerHTML = `
+            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:4px;background:rgba(15,23,42,0.85);padding:6px 8px;border-radius:6px;border:1px solid rgba(0,229,255,0.25);">
+                <div>Total Zerg: <b style="color:#fff;">${aiRep.totalZergUnits}</b></div>
+                <div>Moving: <b style="color:#34d399;">${aiRep.movingCount}</b></div>
+                <div>Attacking: <b style="color:#f87171;">${aiRep.attackingCount}</b></div>
+                <div>Searching: <b style="color:#38bdf8;">${aiRep.searchingCount}</b></div>
+                <div>Stuck: <b style="color:#fbbf24;">${aiRep.stuckCount}</b></div>
+                <div>Recovering: <b style="color:#c084fc;">${aiRep.recoveringCount}</b></div>
+            </div>
+            ${simHtml}
+            ${gfxHtml}
+            <div style="display:flex;flex-direction:column;gap:3px;max-height:115px;overflow-y:auto;padding-right:2px;">
+                <div style="font-size:10px;color:#94a3b8;font-weight:700;">SELECT ZERG UNIT (CLICK ROW OR TAP IN 3D WORLD):</div>
+                ${unitRows || '<div style="color:#64748b;font-size:10px;">0 living Zerg units</div>'}
+            </div>
+            ${inspectorHtml}
+            ${logsHtml}
+        `;
+
+        const rows = body.querySelectorAll('.dbg-unit-row');
+        rows.forEach(r => {
+            r.onclick = () => {
+                this.selectUnit(r.getAttribute('data-uid'));
+            };
+        });
+    },
+    update(dt) {
+        if (!this.enabled) return;
+        this._updateWorldViz();
+        this.renderUI(false);
     }
+};
+window.toggleStarblockDebugMode = function() {
+    if (window.AI_DEBUG) window.AI_DEBUG.toggle();
 };
 
 window.addEventListener('keydown', (ev) => {
-    if (ev.key === 'F8') {
+    if (ev.key === 'F8' || ev.key === 'F9') {
         ev.preventDefault();
         if (window.AI_DEBUG) window.AI_DEBUG.toggle();
     }
@@ -10818,93 +11214,169 @@ function animate(now) {
                     e.aiState = 'MOVING';
                 }
 
-                // Helper to advance a ground Zerg unit toward a target position with guaranteed fallback movement & unsticking
-                const advanceGroundZergToward = (goalPos) => {
-                    if (!goalPos) {
+                const frameStartX = e.mesh.position.x;
+                const frameStartZ = e.mesh.position.z;
+
+                // Helper to advance a ground Zerg unit toward a target position with validated waypoints & obstacle-safe recovery (never teleports or force-slides through obstacles!)
+                const advanceGroundZergToward = (rawGoalPos) => {
+                    if (!rawGoalPos) {
                         e.stopReason = 'no_goal_pos';
+                        e.navSuccess = false;
                         return false;
                     }
-                    e.currentDestination = { x: Number(goalPos.x.toFixed(2)), z: Number(goalPos.z.toFixed(2)) };
-                    e.distanceToDestination = Number(Math.hypot(goalPos.x - e.mesh.position.x, goalPos.z - e.mesh.position.z).toFixed(2));
+                    const unitRad = e.radius || 0.52;
+                    const surfFn = typeof getSurfaceHeightWithBridges === 'function' ? getSurfaceHeightWithBridges : getTerrainHeight;
+                    const validGoal = (typeof window.validateGroundDestination === 'function')
+                        ? window.validateGroundDestination(e.mesh.position, rawGoalPos, unitRad)
+                        : rawGoalPos;
+
+                    e.currentDestination = { x: Number(validGoal.x.toFixed(2)), z: Number(validGoal.z.toFixed(2)) };
+                    e.distanceToDestination = Number(Math.hypot(validGoal.x - e.mesh.position.x, validGoal.z - e.mesh.position.z).toFixed(2));
                     e.currentSpeed = Number(effEnemySpeed.toFixed(2));
 
-                    // Immediate spawn/structure overlap push-out so Zerg units never get trapped inside their own Hive/Pool/Warren footprint
-                    for (let ebi = 0; ebi < enemyBuildings.length; ebi++) {
-                        const eb = enemyBuildings[ebi];
-                        if (!eb || eb.hp <= 0 || !eb.pos) continue;
-                        const ebRad = (eb.footprintRadius || 2.1) + (e.radius || 0.5) * 0.45;
-                        const bdx = e.mesh.position.x - eb.pos.x;
-                        const bdz = e.mesh.position.z - eb.pos.z;
-                        const bDist = Math.hypot(bdx, bdz);
-                        if (bDist < ebRad) {
-                            const pushAng = bDist > 0.05 ? Math.atan2(bdx, bdz) : Math.atan2(goalPos.x - eb.pos.x, goalPos.z - eb.pos.z);
-                            const pushStep = Math.max(effEnemySpeed * dt * 1.35, (ebRad - bDist) + 0.18);
-                            e.mesh.position.x += Math.sin(pushAng) * pushStep;
-                            e.mesh.position.z += Math.cos(pushAng) * pushStep;
-                            e.mesh.position.y = getTerrainHeight(e.mesh.position.x, e.mesh.position.z);
-                        }
-                    }
-
-                    const navPt = getGroundNavigationWaypoint(e.mesh.position, goalPos, e) || goalPos;
-                    const stepDir = computeSafeGroundStep(e.mesh.position, navPt, effEnemySpeed, dt, e, enemies, buildings, enemyBuildings);
-                    let didMove = false;
-                    if (stepDir && stepDir.lengthSq() > 0.0001) {
-                        e.mesh.position.addScaledVector(stepDir, effEnemySpeed * dt);
-                        alignGroundUnitToTerrain(e.mesh, e.mesh.position.x + stepDir.x, e.mesh.position.z + stepDir.z, dt);
-                        e.lastNavResult = 'waypoint_step';
-                        e.stopReason = 'none';
-                        e.lastMoveTime = state.elapsedSec;
-                        didMove = true;
-                    } else {
-                        // Multi-Ring Fallback Direct Steering when computeSafeGroundStep returns zero vector
-                        const fdx = navPt.x - e.mesh.position.x;
-                        const fdz = navPt.z - e.mesh.position.z;
-                        const fLen = Math.hypot(fdx, fdz);
-                        if (fLen > 0.05) {
-                            const baseAng = Math.atan2(fdx, fdz);
-                            const tryAngles = [0, 0.45, -0.45, 0.92, -0.92, 1.45, -1.45, 2.1, -2.1, Math.PI];
-                            const stepLen = Math.max(0.04, effEnemySpeed * dt);
-                            const probeRings = [stepLen, Math.max(stepLen * 2.5, 0.55), 1.35];
-                            let escaped = false;
-                            for (let rIdx = 0; rIdx < probeRings.length && !escaped; rIdx++) {
-                                const probeDist = probeRings[rIdx];
-                                for (let aIdx = 0; aIdx < tryAngles.length; aIdx++) {
-                                    const ang = baseAng + tryAngles[aIdx];
-                                    const sx = Math.sin(ang);
-                                    const sz = Math.cos(ang);
-                                    const px = e.mesh.position.x + sx * probeDist;
-                                    const pz = e.mesh.position.z + sz * probeDist;
-                                    if (typeof isWalkableGround !== 'function' || isWalkableGround(px, pz, (e.radius || 0.5) * 0.35)) {
-                                        e.mesh.position.x += sx * stepLen;
-                                        e.mesh.position.z += sz * stepLen;
-                                        alignGroundUnitToTerrain(e.mesh, e.mesh.position.x + sx, e.mesh.position.z + sz, dt);
-                                        e.lastNavResult = aIdx === 0 ? 'direct_fallback' : 'angled_fallback';
+                    // 1. Safe recovery when a unit is trapped inside its own structure or any building footprint:
+                    //    Smoothly guide the unit radially outward toward the nearest walkable perimeter point.
+                    const checkBuildingLists = [enemyBuildings, buildings, typeof solarisBuildings !== 'undefined' ? solarisBuildings : null];
+                    for (let li = 0; li < checkBuildingLists.length; li++) {
+                        const bList = checkBuildingLists[li];
+                        if (!Array.isArray(bList)) continue;
+                        for (let bi = 0; bi < bList.length; bi++) {
+                            const b = bList[bi];
+                            if (!b || b.hp <= 0 || !b.pos) continue;
+                            const bFootprint = b.footprintRadius || 2.2;
+                            const minSafeDist = bFootprint + unitRad + 0.22;
+                            const bdx = e.mesh.position.x - b.pos.x;
+                            const bdz = e.mesh.position.z - b.pos.z;
+                            const bDist = Math.hypot(bdx, bdz);
+                            if (bDist < minSafeDist) {
+                                const baseEscapeAng = bDist > 0.05
+                                    ? Math.atan2(bdx, bdz)
+                                    : Math.atan2(validGoal.x - b.pos.x, validGoal.z - b.pos.z);
+                                const escapeStep = Math.min(0.45, Math.max(effEnemySpeed * dt * 1.35, (minSafeDist - bDist) * 0.65));
+                                for (let aTry = 0; aTry < 12; aTry++) {
+                                    const angOff = (aTry % 2 === 0 ? 1 : -1) * Math.floor((aTry + 1) / 2) * (Math.PI / 6);
+                                    const tryAng = baseEscapeAng + angOff;
+                                    const ex = e.mesh.position.x + Math.sin(tryAng) * escapeStep;
+                                    const ez = e.mesh.position.z + Math.cos(tryAng) * escapeStep;
+                                    if (typeof isWalkableGround !== 'function' || isWalkableGround(ex, ez, unitRad * 0.40)) {
+                                        e.mesh.position.x = ex;
+                                        e.mesh.position.z = ez;
+                                        e.mesh.position.y = surfFn(ex, ez);
+                                        alignGroundUnitToTerrain(e.mesh, ex + Math.sin(tryAng), ez + Math.cos(tryAng), dt);
+                                        e.lastNavResult = 'structure_escape';
+                                        e.navSuccess = true;
                                         e.stopReason = 'none';
                                         e.lastMoveTime = state.elapsedSec;
-                                        didMove = true;
-                                        escaped = true;
-                                        break;
+                                        return true;
                                     }
                                 }
                             }
-                            if (!escaped) {
-                                // Unconditional forward slide toward goal so a unit never freezes in place
-                                const sx = Math.sin(baseAng);
-                                const sz = Math.cos(baseAng);
-                                e.mesh.position.x += sx * stepLen;
-                                e.mesh.position.z += sz * stepLen;
-                                alignGroundUnitToTerrain(e.mesh, e.mesh.position.x + sx, e.mesh.position.z + sz, dt);
-                                e.lastNavResult = 'forced_slide_fallback';
-                                e.stopReason = 'none';
-                                e.lastMoveTime = state.elapsedSec;
-                                didMove = true;
+                        }
+                    }
+
+                    // 2. If an active recovery detour waypoint is set, follow it until reached or expired
+                    let activeTarget = validGoal;
+                    if (e.recoveryDetourPos && e.recoveryDetourTimer > 0) {
+                        e.recoveryDetourTimer = Math.max(0, e.recoveryDetourTimer - dt);
+                        const dDetour = Math.hypot(e.recoveryDetourPos.x - e.mesh.position.x, e.recoveryDetourPos.z - e.mesh.position.z);
+                        if (dDetour > 1.35) {
+                            activeTarget = e.recoveryDetourPos;
+                        } else {
+                            e.recoveryDetourPos = null;
+                            e.recoveryDetourTimer = 0;
+                        }
+                    }
+
+                    const navPt = getGroundNavigationWaypoint(e.mesh.position, activeTarget, e) || activeTarget;
+                    e.navWaypoint = { x: Number(navPt.x.toFixed(2)), z: Number(navPt.z.toFixed(2)) };
+
+                    const stepDir = computeSafeGroundStep(e.mesh.position, navPt, effEnemySpeed, dt, e, enemies, buildings, enemyBuildings);
+                    const stepLen = effEnemySpeed * dt;
+                    let didMove = false;
+
+                    if (stepDir && stepDir.lengthSq() > 0.0001) {
+                        const nextX = e.mesh.position.x + stepDir.x * stepLen;
+                        const nextZ = e.mesh.position.z + stepDir.z * stepLen;
+                        const walkOk = (typeof isWalkableGround !== 'function') || isWalkableGround(nextX, nextZ, unitRad * 0.45);
+                        const bldOk = (typeof window.isPointClearOfAllBuildings !== 'function') || window.isPointClearOfAllBuildings(nextX, nextZ, unitRad * 0.45, validGoal);
+                        if (walkOk && bldOk) {
+                            e.mesh.position.x = nextX;
+                            e.mesh.position.z = nextZ;
+                            alignGroundUnitToTerrain(e.mesh, nextX + stepDir.x, nextZ + stepDir.z, dt);
+                            e.lastNavResult = activeTarget === e.recoveryDetourPos ? 'recovery_detour' : 'waypoint_step';
+                            e.navSuccess = true;
+                            e.stopReason = 'none';
+                            e.lastMoveTime = state.elapsedSec;
+                            didMove = true;
+                        }
+                    }
+
+                    // 3. Validated Fallback Route when A* or direct step is blocked (never teleports or slides into obstacles!)
+                    if (!didMove) {
+                        const fdx = navPt.x - e.mesh.position.x;
+                        const fdz = navPt.z - e.mesh.position.z;
+                        const fLen = Math.hypot(fdx, fdz);
+                        if (fLen > 0.08) {
+                            const baseAng = Math.atan2(fdx, fdz);
+                            const sign = e.wallFollowSign || e.flankSign || 1;
+                            const tryOffsets = [
+                                0,
+                                sign * 0.38, -sign * 0.38,
+                                sign * 0.78, -sign * 0.78,
+                                sign * 1.18, -sign * 1.18,
+                                sign * 1.57, -sign * 1.57,
+                                sign * 2.05, -sign * 2.05,
+                                sign * 2.55, -sign * 2.55,
+                                Math.PI
+                            ];
+                            for (let aIdx = 0; aIdx < tryOffsets.length; aIdx++) {
+                                const tryAng = baseAng + tryOffsets[aIdx];
+                                // Skip angle if it matches the most recent blocked heading memory
+                                if (typeof e._blockedHeading === 'number') {
+                                    let diff = Math.abs(Math.atan2(Math.sin(tryAng - e._blockedHeading), Math.cos(tryAng - e._blockedHeading)));
+                                    if (diff < 0.28 && aIdx < tryOffsets.length - 2) continue;
+                                }
+                                const sx = Math.sin(tryAng);
+                                const sz = Math.cos(tryAng);
+                                const candX = e.mesh.position.x + sx * stepLen;
+                                const candZ = e.mesh.position.z + sz * stepLen;
+                                const lookX = e.mesh.position.x + sx * Math.max(0.85, unitRad + 0.45);
+                                const lookZ = e.mesh.position.z + sz * Math.max(0.85, unitRad + 0.45);
+                                const stepWalkOk = (typeof isWalkableGround !== 'function') || (isWalkableGround(candX, candZ, unitRad * 0.45) && isWalkableGround(lookX, lookZ, unitRad * 0.45));
+                                const stepBldOk = (typeof window.isPointClearOfAllBuildings !== 'function') || (window.isPointClearOfAllBuildings(candX, candZ, unitRad * 0.45, validGoal) && window.isPointClearOfAllBuildings(lookX, lookZ, unitRad * 0.45, validGoal));
+                                if (stepWalkOk && stepBldOk) {
+                                    e.mesh.position.x = candX;
+                                    e.mesh.position.z = candZ;
+                                    alignGroundUnitToTerrain(e.mesh, candX + sx, candZ + sz, dt);
+                                    e.lastNavResult = aIdx === 0 ? 'direct_fallback' : 'flank_detour_fallback';
+                                    e.navSuccess = true;
+                                    e.stopReason = 'none';
+                                    e.lastMoveTime = state.elapsedSec;
+                                    // Commit to a short detour waypoint when deflecting around an obstacle so unit doesn't oscillate
+                                    if (aIdx >= 3) {
+                                        const detourX = e.mesh.position.x + sx * 3.2;
+                                        const detourZ = e.mesh.position.z + sz * 3.2;
+                                        if (typeof isWalkableGround === 'function' && isWalkableGround(detourX, detourZ, unitRad * 0.45)) {
+                                            e.recoveryDetourPos = new THREE.Vector3(detourX, surfFn(detourX, detourZ), detourZ);
+                                            e.recoveryDetourTimer = 0.65;
+                                        }
+                                    }
+                                    didMove = true;
+                                    break;
+                                }
+                            }
+                            if (!didMove) {
+                                e.lastNavResult = 'blocked';
+                                e.navSuccess = false;
+                                e.stopReason = e._lastNavFailure || 'obstacle_blocked';
                             }
                         } else {
                             e.lastNavResult = 'at_waypoint';
+                            e.navSuccess = true;
                             e.stopReason = 'reached_waypoint';
                         }
                     }
-                    // Always run world-position stuck detection even when stepDir was zero
+
                     checkAndUnstickGroundUnit(e, navPt, dt);
                     return didMove;
                 };
@@ -10967,20 +11439,23 @@ function animate(now) {
                 e.targetLockTimer = Math.max(0, (e.targetLockTimer || 0) - dt);
                 let bestTarget = null, bestDist = Infinity, isBuildingTarget = false;
 
-                // Validate lockedTarget before accessing position, mesh, health, or faction
-                if (e.lockedTarget && typeof e.lockedTarget.hp === 'number' && e.lockedTarget.hp > 0 && e.targetLockTimer > 0) {
+                // Validate lockedTarget before accessing position, mesh, health, or faction (handles dead units & destroyed buildings cleanly)
+                if (e.lockedTarget) {
                     const lt = e.lockedTarget;
+                    const ltAlive = typeof lt.hp === 'number' && lt.hp > 0;
                     const ltIsBld = Boolean(!lt.mesh || buildings.includes(lt) || (typeof solarisBuildings !== 'undefined' && solarisBuildings.includes(lt)) || lt === state.baseBuilding);
+                    const ltStillExists = ltIsBld
+                        ? (lt === state.baseBuilding ? Boolean(state.basePlaced && state.baseBuilding && state.baseBuilding.hp > 0) : (buildings.includes(lt) || (typeof solarisBuildings !== 'undefined' && solarisBuildings.includes(lt))))
+                        : units.includes(lt);
                     const ltPos = ltIsBld ? lt.pos : (lt.mesh ? lt.mesh.position : lt.pos);
-                    if (ltPos && Number.isFinite(ltPos.x) && Number.isFinite(ltPos.z) && !(lt.isAir && e.range < 4.0)) {
+                    if (ltAlive && ltStillExists && ltPos && Number.isFinite(ltPos.x) && Number.isFinite(ltPos.z) && !(lt.isAir && e.range < 4.0) && e.targetLockTimer > 0) {
                         bestTarget = lt;
                         isBuildingTarget = ltIsBld;
                         bestDist = Math.hypot(ltPos.x - e.mesh.position.x, ltPos.z - e.mesh.position.z);
-                    } else {
+                    } else if (!ltAlive || !ltStillExists) {
                         e.lockedTarget = null;
+                        e.targetLockTimer = 0;
                     }
-                } else if (e.lockedTarget && (!e.lockedTarget.hp || e.lockedTarget.hp <= 0)) {
-                    e.lockedTarget = null;
                 }
 
                 if (!bestTarget) {
@@ -10996,8 +11471,7 @@ function animate(now) {
                             if (d < closestUnitDist) { closestUnitDist = d; closestUnit = u; }
                         }
                     }
-                    // CRITICAL FIX: Never treat an empty or non-matching spatial-grid query as proof that no targets exist!
-                    // Always fall back to a full valid-target scan over `units` whenever `closestUnit` is still null.
+                    // Fallback to full valid-target scan over `units` whenever spatial query finds nothing
                     if (!closestUnit) {
                         for (let ui = 0; ui < units.length; ui++) {
                             const u = units[ui];
@@ -11050,7 +11524,8 @@ function animate(now) {
 
                     if (bestTarget) {
                         e.lockedTarget = bestTarget;
-                        e.targetLockTimer = 0.75;
+                        e.lockedTargetIsBuilding = isBuildingTarget;
+                        e.targetLockTimer = 1.25; // Solid hysteresis lock so units don't continually switch targets
                     }
                 } else if (isBuildingTarget && bestDist > 6.5) {
                     // Even while locked on a distant building, switch to a hostile unit that engages at close range (< 6.0m)
@@ -11066,7 +11541,8 @@ function animate(now) {
                             bestDist = dU;
                             isBuildingTarget = false;
                             e.lockedTarget = u;
-                            e.targetLockTimer = 0.85;
+                            e.lockedTargetIsBuilding = false;
+                            e.targetLockTimer = 1.25;
                             break;
                         }
                     }
@@ -11112,6 +11588,7 @@ function animate(now) {
                                 spawnCombatFloat(e.mesh.position, 'AMBUSH!', '#ff2a4b');
                             }
                         } else {
+                            e.actualSpeedPerSec = 0;
                             updateUnitAnimation(e.mesh, dt, false, null);
                             continue;
                         }
@@ -11121,7 +11598,7 @@ function animate(now) {
                 let rawTargetPos = validTargetPos;
                 let attackNavTarget = rawTargetPos;
 
-                if ((isZergLosing || e.isFlanker) && bestDist > 10.5) {
+                if ((isZergLosing || e.isFlanker) && bestDist > 10.5 && (e.recoveryAttempts || 0) < 2) {
                     const toTargetX = rawTargetPos.x - e.mesh.position.x;
                     const toTargetZ = rawTargetPos.z - e.mesh.position.z;
                     const toLen = Math.hypot(toTargetX, toTargetZ) || 1;
@@ -11179,6 +11656,7 @@ function animate(now) {
                     if ((e.variant === 'behemoth' || e.variant === 'gorgon') && bestDist <= Math.max(e.range || 8.0, engageRange)) {
                         e.aiState = 'ATTACKING';
                         e.lastNavResult = 'in_attack_range';
+                        e.navSuccess = true;
                         e.stopReason = 'in_attack_range';
                         if (e.cooldown <= 0) {
                             e.mesh.userData.attackAnim = 1.0;
@@ -11190,13 +11668,14 @@ function animate(now) {
                             e.watchdogTimer = 0;
                         }
                         if (bestDist > (blockingShieldTurret ? 11.2 : 5.5)) {
-                            moving = advanceGroundZergToward(attackNavTarget);
+                            advanceGroundZergToward(attackNavTarget);
                         } else {
                             alignGroundUnitToTerrain(e.mesh, tPos.x, tPos.z, dt);
                         }
                     } else if (bestDist <= engageRange) {
                         e.aiState = 'ATTACKING';
                         e.lastNavResult = 'in_attack_range';
+                        e.navSuccess = true;
                         e.stopReason = 'in_attack_range';
                         if (e.isAir) {
                             smoothAirVehicleTransform(e, tPos.x, tPos.z, 5.8, false, dt);
@@ -11244,6 +11723,7 @@ function animate(now) {
                     } else if (e.isAir) {
                         e.aiState = 'MOVING';
                         e.currentDestination = { x: Number(attackNavTarget.x.toFixed(2)), z: Number(attackNavTarget.z.toFixed(2)) };
+                        e.navWaypoint = e.currentDestination;
                         e.distanceToDestination = Number(Math.hypot(attackNavTarget.x - e.mesh.position.x, attackNavTarget.z - e.mesh.position.z).toFixed(2));
                         e.currentSpeed = Number(effEnemySpeed.toFixed(2));
                         const dxAir = attackNavTarget.x - e.mesh.position.x;
@@ -11253,61 +11733,98 @@ function animate(now) {
                         e.mesh.position.z += (dzAir / lenAir) * effEnemySpeed * dt;
                         smoothAirVehicleTransform(e, attackNavTarget.x, attackNavTarget.z, 5.8, true, dt);
                         e.lastNavResult = 'air_direct';
+                        e.navSuccess = true;
                         e.stopReason = 'none';
                         e.lastMoveTime = state.elapsedSec;
-                        moving = true;
                     } else {
                         if (e.aiState !== 'SPAWNING') e.aiState = 'MOVING';
-                        moving = advanceGroundZergToward(attackNavTarget);
+                        advanceGroundZergToward(attackNavTarget);
                     }
 
-                    // --- COMBAT WATCHDOG: Recover any unit that has not moved or attacked for watchdogPeriod (~2.2s) ---
-                    if (!e.lastActionPos) e.lastActionPos = e.mesh.position.clone();
-                    const movedDist = Math.hypot(e.mesh.position.x - e.lastActionPos.x, e.mesh.position.z - e.lastActionPos.z);
-                    if (movedDist > 0.35) {
-                        e.lastActionPos.copy(e.mesh.position);
-                        e.watchdogTimer = 0;
-                        e.lastCombatActionTime = state.elapsedSec;
-                        e.lastMoveTime = state.elapsedSec;
-                    } else if (e.aiState !== 'ATTACKING') {
-                        e.watchdogTimer = (e.watchdogTimer || 0) + dt;
-                        if (e.watchdogTimer >= (e.watchdogPeriod || 2.2)) {
-                            e.watchdogTimer = 0;
-                            e.recoveryAttempts = (e.recoveryAttempts || 0) + 1;
-                            e.lastRecoveryTime = state.elapsedSec;
-                            // 1. Reacquire target & clear cached navigation waypoints
-                            e.lockedTarget = null;
-                            e.targetLockTimer = 0;
-                            e.navWaypoints = null;
-                            if (typeof RIVER_BRIDGES !== 'undefined' && RIVER_BRIDGES.length > 0) {
-                                e.preferredBridgeIdx = ((e.preferredBridgeIdx || 0) + 1) % RIVER_BRIDGES.length;
+                    // --- COMBAT WATCHDOG: Detects BOTH zero movement AND circular/looping movement ---
+                    if (!e.isAir) {
+                        if (!e._posHistory) e._posHistory = [{ x: e.mesh.position.x, z: e.mesh.position.z, t: state.elapsedSec }];
+                        e._posSampleTimer = (e._posSampleTimer || 0) + dt;
+                        if (e._posSampleTimer >= 0.25) {
+                            e._posSampleTimer = 0;
+                            e._posHistory.push({ x: e.mesh.position.x, z: e.mesh.position.z, t: state.elapsedSec });
+                            if (e._posHistory.length > 8) e._posHistory.shift();
+                        }
+
+                        if (e.aiState !== 'ATTACKING' && e._posHistory.length >= 6) {
+                            let pathLen = 0;
+                            for (let hi = 1; hi < e._posHistory.length; hi++) {
+                                pathLen += Math.hypot(e._posHistory[hi].x - e._posHistory[hi - 1].x, e._posHistory[hi].z - e._posHistory[hi - 1].z);
                             }
-                            // 2. Safe recovery step toward clear walkable terrain toward target
-                            if (!e.isAir) {
-                                const toTX = tPos.x - e.mesh.position.x;
-                                const toTZ = tPos.z - e.mesh.position.z;
-                                const baseAng = Math.atan2(toTX, toTZ);
-                                const offsets = [0, 0.78, -0.78, 1.45, -1.45, 2.2, -2.2, Math.PI];
-                                for (let oi = 0; oi < offsets.length; oi++) {
-                                    const tryAng = baseAng + offsets[oi];
-                                    const rx = e.mesh.position.x + Math.sin(tryAng) * 2.2;
-                                    const rz = e.mesh.position.z + Math.cos(tryAng) * 2.2;
-                                    if (typeof isWalkableGround !== 'function' || isWalkableGround(rx, rz, (e.radius || 0.5) * 0.5) || oi === offsets.length - 1) {
-                                        e.mesh.position.x = rx;
-                                        e.mesh.position.z = rz;
-                                        e.mesh.position.y = getTerrainHeight(rx, rz);
-                                        e.lastActionPos.copy(e.mesh.position);
-                                        e.lastNavResult = 'watchdog_recovery';
-                                        e.lastMoveTime = state.elapsedSec;
-                                        moving = true;
-                                        break;
+                            const oldest = e._posHistory[0];
+                            const netDisp = Math.hypot(e.mesh.position.x - oldest.x, e.mesh.position.z - oldest.z);
+                            const isZeroMove = pathLen < 0.35 && netDisp < 0.30;
+                            const isCircling = pathLen > 1.85 && netDisp < 0.80;
+
+                            if (isZeroMove || isCircling) {
+                                e.watchdogTimer = (e.watchdogTimer || 0) + dt;
+                                if (e.watchdogTimer >= 0.55) {
+                                    e.watchdogTimer = 0;
+                                    e._posHistory.length = 0;
+                                    e._posHistory.push({ x: e.mesh.position.x, z: e.mesh.position.z, t: state.elapsedSec });
+                                    e.recoveryAttempts = (e.recoveryAttempts || 0) + 1;
+                                    e.lastRecoveryTime = state.elapsedSec;
+                                    e.lastStuckPos = { x: Number(e.mesh.position.x.toFixed(2)), z: Number(e.mesh.position.z.toFixed(2)) };
+
+                                    if (typeof window.recordNavStuckHotspot === 'function') {
+                                        window.recordNavStuckHotspot(e.mesh.position.x, e.mesh.position.z, 3.0, 2.2);
+                                    }
+
+                                    // Remember the blocked heading so recovery never repeatedly sends the unit into the same obstacle
+                                    const wpRef = e.navWaypoint || tPos;
+                                    const blockedAng = Math.atan2(wpRef.x - e.mesh.position.x, wpRef.z - e.mesh.position.z);
+                                    e._blockedHeading = blockedAng;
+                                    e.wallFollowSign = -(e.wallFollowSign || e.flankSign || 1);
+                                    e.navWaypoints = null;
+                                    e.navRepathTimer = 0;
+
+                                    if (typeof RIVER_BRIDGES !== 'undefined' && RIVER_BRIDGES.length > 1 && e.recoveryAttempts % 2 === 0) {
+                                        e.preferredBridgeIdx = ((e.preferredBridgeIdx || 0) + 1) % RIVER_BRIDGES.length;
+                                        if (window.BRIDGE_TRAFFIC_MANAGER) window.BRIDGE_TRAFFIC_MANAGER.releaseActor(e);
+                                    }
+
+                                    // Assign a validated walkable detour waypoint away from the blocked heading (without teleporting!)
+                                    const surfH = typeof getSurfaceHeightWithBridges === 'function' ? getSurfaceHeightWithBridges : getTerrainHeight;
+                                    const detourAngles = [
+                                        e.wallFollowSign * 1.35,
+                                        -e.wallFollowSign * 1.35,
+                                        e.wallFollowSign * 2.05,
+                                        -e.wallFollowSign * 2.05,
+                                        Math.PI
+                                    ];
+                                    for (let di = 0; di < detourAngles.length; di++) {
+                                        const dAng = blockedAng + detourAngles[di];
+                                        const dx = e.mesh.position.x + Math.sin(dAng) * 6.5;
+                                        const dz = e.mesh.position.z + Math.cos(dAng) * 6.5;
+                                        if (typeof isWalkableGround === 'function' && isWalkableGround(dx, dz, (e.radius || 0.5) * 0.5) &&
+                                            (typeof window.isPointClearOfAllBuildings !== 'function' || window.isPointClearOfAllBuildings(dx, dz, (e.radius || 0.5) * 0.5))) {
+                                            e.recoveryDetourPos = new THREE.Vector3(dx, surfH(dx, dz), dz);
+                                            e.recoveryDetourTimer = 1.6;
+                                            break;
+                                        }
+                                    }
+
+                                    if (window.AI_DEBUG && window.AI_DEBUG.loggingEnabled) {
+                                        window.AI_DEBUG.logEvent(`Watchdog recovery #${e.recoveryAttempts} on ${e.id} (${isCircling ? 'circling' : 'zero_move'}) at (${e.lastStuckPos.x}, ${e.lastStuckPos.z})`);
                                     }
                                 }
+                            } else {
+                                e.watchdogTimer = 0;
                             }
-                            e.aiState = 'MOVING';
                         }
                     }
                 }
+
+                // Measure actual frame displacement to synchronize walk animation and telemetry
+                const actualFrameDist = Math.hypot(e.mesh.position.x - frameStartX, e.mesh.position.z - frameStartZ);
+                e.actualSpeedPerSec = dt > 0.0001 ? Number((actualFrameDist / dt).toFixed(2)) : 0;
+                moving = actualFrameDist > 0.0012;
+                e.walkableAtPos = e.isAir ? true : Boolean(typeof isWalkableGround === 'function' ? isWalkableGround(e.mesh.position.x, e.mesh.position.z, (e.radius || 0.5) * 0.40) : true);
 
                 // Fog-of-War & Viewport visibility ONLY controls rendering, never AI simulation!
                 const eVisFow = isWorldPosVisible(e.mesh.position.x, e.mesh.position.z);
@@ -13625,19 +14142,32 @@ window.ZERG_AI_DIAGNOSTICS = {
         if (!e) return null;
         const t = e.lockedTarget;
         let targetDesc = 'none';
+        let targetCoords = null;
         if (t) {
             if (t === state.baseBuilding) targetDesc = 'player_base_hq';
             else if (t.type) targetDesc = `${t.faction || 'ally'}_${t.type}`;
             else if (t.role) targetDesc = `solaris_${t.role}`;
             else targetDesc = 'hostile_target';
+            const tp = t.mesh ? t.mesh.position : t.pos;
+            if (tp && Number.isFinite(tp.x) && Number.isFinite(tp.z)) {
+                targetCoords = { x: Number(tp.x.toFixed(2)), z: Number(tp.z.toFixed(2)) };
+            }
         }
+        const isStuck = Boolean((e.stuckTimer || 0) > 0.25 || !e.navSuccess || e.lastNavResult === 'blocked');
+        const isRecovering = Boolean((e.recoveryStage || 0) > 0 || (e.recoveryDetourTimer || 0) > 0);
+        const bridgeIdx = e.activeBridgeCrossIdx !== undefined ? `Active Bridge #${e.activeBridgeCrossIdx}` : (e.preferredBridgeIdx !== undefined ? `Pref Bridge #${e.preferredBridgeIdx}` : 'Open Terrain');
         return {
             unitId: e.id || 'unassigned',
             unitType: e.variant || 'skitterer',
             aiState: e.aiState || 'MOVING',
+            position: e.mesh ? { x: Number(e.mesh.position.x.toFixed(2)), z: Number(e.mesh.position.z.toFixed(2)) } : { x: 0, z: 0 },
             currentTarget: targetDesc,
+            targetCoords,
             destination: e.currentDestination || null,
+            navigationWaypoint: e.navWaypoint || e.currentDestination || null,
+            navigationSuccess: e.navSuccess !== false,
             movementSpeed: typeof e.currentSpeed === 'number' ? e.currentSpeed : Number((e.speed || 0).toFixed(2)),
+            actualSpeedPerSec: typeof e.actualSpeedPerSec === 'number' ? e.actualSpeedPerSec : 0,
             distanceToDestination: typeof e.distanceToDestination === 'number'
                 ? e.distanceToDestination
                 : (typeof e.currentTargetDist === 'number' ? Number(e.currentTargetDist.toFixed(2)) : null),
@@ -13649,6 +14179,10 @@ window.ZERG_AI_DIAGNOSTICS = {
             attackCooldown: Number(Math.max(0, e.cooldown || 0).toFixed(2)),
             lastRecoveryAttempt: e.recoveryAttempts || 0,
             lastRecoveryTime: Number((e.lastRecoveryTime || 0).toFixed(2)),
+            bridgeAssignment: bridgeIdx,
+            terrainWalkable: e.walkableAtPos !== false,
+            isStuck,
+            isRecovering,
             currentError: e.lastError || null
         };
     },
@@ -13664,12 +14198,132 @@ window.ZERG_AI_DIAGNOSTICS = {
             totalZergBuildings: enemyBuildings.length,
             movingCount: unitReports.filter(r => r.aiState === 'MOVING' || r.aiState === 'SPAWNING').length,
             attackingCount: unitReports.filter(r => r.aiState === 'ATTACKING').length,
+            searchingCount: unitReports.filter(r => r.aiState === 'SEARCHING').length,
+            stuckCount: unitReports.filter(r => r.isStuck).length,
+            recoveringCount: unitReports.filter(r => r.isRecovering).length,
             units: unitReports
         };
     }
 };
 window.getZergAIDiagnosticReport = function() {
     return window.ZERG_AI_DIAGNOSTICS.getReport();
+};
+
+// ============================================================================
+// AUTOMATED ZERG GROUND MOVEMENT & NAVIGATION SIMULATION TEST
+// Spawns multiple Zerg ground unit variants at actual Hive structures, advances
+// their navigation & collision steps across 90 simulation frames (3.0s virtual
+// time), and verifies that every unit changes position over time, escapes its
+// spawn structure, and advances toward a valid attack destination.
+// ============================================================================
+window.runZergMovementSimulationTest = function(keepSpawnedUnits = true) {
+    const variantsToTest = ['skitterer', 'spitter', 'crusher', 'gorgon', 'behemoth'];
+    const spawnedTestUnits = [];
+    const spawnRecords = [];
+
+    for (let vIdx = 0; vIdx < variantsToTest.length; vIdx++) {
+        const v = variantsToTest[vIdx];
+        const prodBld = enemyBuildings.find(eb => eb && eb.hp > 0 && (eb.role === 'barracks' || eb.role === 'factory' || eb.role === 'citadel')) || state.enemyBase;
+        const origin = prodBld && prodBld.pos ? prodBld.pos : ENEMY_BASE_POS;
+        const unit = spawnEnemyFromBuilding(v, origin, prodBld);
+        if (unit && unit.mesh) {
+            spawnedTestUnits.push(unit);
+            spawnRecords.push({
+                unit,
+                startX: unit.mesh.position.x,
+                startZ: unit.mesh.position.z
+            });
+        }
+    }
+
+    const simDt = 1 / 30;
+    const simSteps = 90; // 3.0 seconds of simulated movement
+    const surfFn = typeof getSurfaceHeightWithBridges === 'function' ? getSurfaceHeightWithBridges : getTerrainHeight;
+    const goalPos = (state.baseBuilding && state.baseBuilding.pos) ? state.baseBuilding.pos : PLAYER_START_POS;
+
+    for (let step = 0; step < simSteps; step++) {
+        for (let uIdx = 0; uIdx < spawnedTestUnits.length; uIdx++) {
+            const e = spawnedTestUnits[uIdx];
+            if (!e || e.hp <= 0 || !e.mesh) continue;
+            const prevX = e.mesh.position.x;
+            const prevZ = e.mesh.position.z;
+            const validGoal = (typeof window.validateGroundDestination === 'function')
+                ? window.validateGroundDestination(e.mesh.position, goalPos, e.radius || 0.52)
+                : goalPos;
+            const navPt = getGroundNavigationWaypoint(e.mesh.position, validGoal, e) || validGoal;
+            e.currentDestination = { x: Number(validGoal.x.toFixed(2)), z: Number(validGoal.z.toFixed(2)) };
+            e.navWaypoint = { x: Number(navPt.x.toFixed(2)), z: Number(navPt.z.toFixed(2)) };
+            const stepDir = computeSafeGroundStep(e.mesh.position, navPt, e.speed || 3.0, simDt, e, enemies, buildings, enemyBuildings);
+            if (stepDir && stepDir.lengthSq() > 0.0001) {
+                const nx = e.mesh.position.x + stepDir.x * (e.speed || 3.0) * simDt;
+                const nz = e.mesh.position.z + stepDir.z * (e.speed || 3.0) * simDt;
+                if (typeof isWalkableGround !== 'function' || isWalkableGround(nx, nz, (e.radius || 0.5) * 0.45)) {
+                    e.mesh.position.x = nx;
+                    e.mesh.position.z = nz;
+                    e.mesh.position.y = surfFn(nx, nz);
+                    alignGroundUnitToTerrain(e.mesh, nx + stepDir.x, nz + stepDir.z, simDt);
+                }
+            }
+            const movedD = Math.hypot(e.mesh.position.x - prevX, e.mesh.position.z - prevZ);
+            e.actualSpeedPerSec = Number((movedD / simDt).toFixed(2));
+            e.navSuccess = movedD > 0.001;
+            e.lastNavResult = movedD > 0.001 ? 'sim_waypoint_step' : 'blocked';
+            e.lastMoveTime = state.elapsedSec || 0;
+        }
+        resolveAllUnitCollisions();
+    }
+
+    let passedCount = 0;
+    let totalDisp = 0;
+    const perUnitResults = [];
+
+    for (let i = 0; i < spawnRecords.length; i++) {
+        const rec = spawnRecords[i];
+        const u = rec.unit;
+        const endX = u.mesh.position.x;
+        const endZ = u.mesh.position.z;
+        const disp = Math.hypot(endX - rec.startX, endZ - rec.startZ);
+        const startDistToGoal = Math.hypot(goalPos.x - rec.startX, goalPos.z - rec.startZ);
+        const endDistToGoal = Math.hypot(goalPos.x - endX, goalPos.z - endZ);
+        const walkableEnd = typeof isWalkableGround === 'function' ? isWalkableGround(endX, endZ, (u.radius || 0.5) * 0.40) : true;
+        const unitPassed = disp >= 2.5 && walkableEnd && (endDistToGoal < startDistToGoal + 4.0);
+        if (unitPassed) passedCount++;
+        totalDisp += disp;
+        perUnitResults.push({
+            unitId: u.id,
+            variant: u.variant,
+            startPos: { x: +rec.startX.toFixed(2), z: +rec.startZ.toFixed(2) },
+            endPos: { x: +endX.toFixed(2), z: +endZ.toFixed(2) },
+            displacementM: +disp.toFixed(2),
+            walkableEnd,
+            passed: unitPassed
+        });
+    }
+
+    if (!keepSpawnedUnits) {
+        for (let i = 0; i < spawnedTestUnits.length; i++) {
+            const u = spawnedTestUnits[i];
+            const idx = enemies.indexOf(u);
+            if (idx !== -1) enemies.splice(idx, 1);
+            if (u.mesh) scene.remove(u.mesh);
+            if (u.hb && u.hb.root) u.hb.root.remove();
+        }
+    }
+
+    const summary = {
+        passed: passedCount === spawnRecords.length && spawnRecords.length > 0,
+        testedCount: spawnRecords.length,
+        passedCount,
+        avgDisplacementM: spawnRecords.length > 0 ? +(totalDisp / spawnRecords.length).toFixed(2) : 0,
+        units: perUnitResults
+    };
+
+    if (window.AI_DEBUG) {
+        window.AI_DEBUG.lastSimTestResult = summary;
+        window.AI_DEBUG.logEvent(`Zerg Sim Test: ${summary.passed ? 'PASSED' : 'FAILED'} (${passedCount}/${spawnRecords.length} units moved, avg ${summary.avgDisplacementM}m)`);
+        window.AI_DEBUG.renderUI(true);
+    }
+    return summary;
 };
 
 window.titleScreenActive = true;
