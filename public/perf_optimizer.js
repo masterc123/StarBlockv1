@@ -385,21 +385,38 @@
             return this.currentConfig;
         },
 
-        applyTier(tierName, renderer) {
-            const preset = QUALITY_PRESETS[tierName] || QUALITY_PRESETS.HIGH;
+        applyTier(tierName, rendererArg) {
+            const upper = String(tierName || 'HIGH').toUpperCase();
+            const mappedKey = upper === 'LOW' || upper === 'LOW-END' ? 'PERFORMANCE' : (upper === 'MOBILE' ? 'BALANCED' : upper);
+            const preset = QUALITY_PRESETS[mappedKey] || QUALITY_PRESETS.HIGH;
             this.activePreset = preset.name;
             this.currentConfig = { ...preset };
             this.current = this.currentConfig;
 
-            if (renderer && typeof renderer.setPixelRatio === 'function') {
+            const targetRenderer = rendererArg || (typeof renderer !== 'undefined' ? renderer : null);
+            if (targetRenderer && typeof targetRenderer.setPixelRatio === 'function') {
                 const rawDpr = window.devicePixelRatio || 1;
                 const targetDpr = Math.min(rawDpr, preset.dprCap);
                 if (Math.abs(targetDpr - this.appliedDpr) > 0.04) {
                     this.appliedDpr = targetDpr;
-                    renderer.setPixelRatio(targetDpr);
+                    targetRenderer.setPixelRatio(targetDpr);
                 }
-                if (renderer.shadowMap) {
-                    renderer.shadowMap.enabled = !!preset.shadowsEnabled;
+                if (targetRenderer.shadowMap) {
+                    const nextShadow = !!preset.shadowsEnabled;
+                    const shadowChanged = (targetRenderer.shadowMap.enabled !== nextShadow)
+                        || (typeof dirLight !== 'undefined' && dirLight && dirLight.castShadow !== nextShadow);
+                    targetRenderer.shadowMap.enabled = nextShadow;
+                    if (typeof dirLight !== 'undefined' && dirLight) {
+                        dirLight.castShadow = nextShadow;
+                    }
+                    if (shadowChanged && typeof scene !== 'undefined' && scene) {
+                        scene.traverse(obj => {
+                            if (obj && obj.isMesh && obj.material) {
+                                const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+                                mats.forEach(m => { if (m) m.needsUpdate = true; });
+                            }
+                        });
+                    }
                 }
             }
         },

@@ -8,16 +8,50 @@ const ENEMY_SVG_ICON = `<svg viewBox="0 0 32 32" fill="none"><polygon points="16
 const IS_MOBILE = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
     || (navigator.maxTouchPoints > 1 && window.matchMedia('(pointer: coarse)').matches);
 
-function makeProceduralTexture(drawFn, repeatX = 1, repeatY = 1) {
-    const canvas = document.createElement('canvas');
-    canvas.width = 512; canvas.height = 512;
-    const ctx = canvas.getContext('2d');
-    drawFn(ctx, 512, 512);
-    const tex = new THREE.CanvasTexture(canvas);
-    tex.wrapS = THREE.RepeatWrapping;
-    tex.wrapT = THREE.RepeatWrapping;
-    tex.repeat.set(repeatX, repeatY);
-    return tex;
+// Centralized Texture Registry & Safe Fallback Texture Generator
+const _whiteFallbackBytes = new Uint8Array([242, 246, 250, 255]);
+const _whiteFallbackTex = new THREE.DataTexture(_whiteFallbackBytes, 1, 1, THREE.RGBAFormat);
+_whiteFallbackTex.needsUpdate = true;
+const _neutralNormalBytes = new Uint8Array([128, 128, 255, 255]);
+const _neutralNormalTex = new THREE.DataTexture(_neutralNormalBytes, 1, 1, THREE.RGBAFormat);
+_neutralNormalTex.needsUpdate = true;
+
+window.TEXTURE_REGISTRY = {
+    _whiteFallbackTex,
+    _neutralNormalTex
+};
+window.TEXTURE_INIT_STATUS = {};
+
+window.registerGameTexture = function(name, tex, category = 'general') {
+    if (tex && tex.isTexture) {
+        tex.name = name;
+        window.TEXTURE_REGISTRY[name] = tex;
+        window.TEXTURE_INIT_STATUS[name] = { status: 'OK', category, width: tex.image ? tex.image.width : 1, height: tex.image ? tex.image.height : 1 };
+        return tex;
+    }
+    window.TEXTURE_REGISTRY[name] = _whiteFallbackTex;
+    window.TEXTURE_INIT_STATUS[name] = { status: 'FALLBACK', category, width: 1, height: 1 };
+    return _whiteFallbackTex;
+};
+
+function makeProceduralTexture(drawFn, repeatX = 1, repeatY = 1, registryName = '') {
+    try {
+        const canvas = document.createElement('canvas');
+        canvas.width = 512; canvas.height = 512;
+        const ctx = canvas.getContext('2d');
+        drawFn(ctx, 512, 512);
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.wrapS = THREE.RepeatWrapping;
+        tex.wrapT = THREE.RepeatWrapping;
+        tex.repeat.set(repeatX, repeatY);
+        tex.needsUpdate = true;
+        if (registryName) window.registerGameTexture(registryName, tex, 'procedural');
+        return tex;
+    } catch (err) {
+        if (window.APP_ERROR_HANDLER) window.APP_ERROR_HANDLER.record('makeProceduralTexture:' + registryName, err, 'graphics');
+        if (registryName) window.registerGameTexture(registryName, _whiteFallbackTex, 'procedural');
+        return _whiteFallbackTex;
+    }
 }
 
 // Terran Dominion Aquila Emblem Texture (Used for Ground Ring & Floating 3D Holo-Crest)
@@ -60,7 +94,7 @@ const humanEmblemTex = makeProceduralTexture((ctx, w, h) => {
     ctx.lineTo(cx + 20, cy + 28); ctx.lineTo(cx, cy + 118); ctx.lineTo(cx - 20, cy + 28);
     ctx.lineTo(cx - 76, cy - 8); ctx.lineTo(cx - 24, cy - 28); ctx.closePath();
     ctx.fill();
-});
+}, 1, 1, 'humanEmblemTex');
 
 // Zerg Brood Bio-Emblem Texture
 const enemyEmblemTex = makeProceduralTexture((ctx, w, h) => {
@@ -86,7 +120,7 @@ const enemyEmblemTex = makeProceduralTexture((ctx, w, h) => {
     [[-38, -25, 14], [38, -25, 14], [0, -62, 17]].forEach(([ox, oy, r]) => {
         ctx.beginPath(); ctx.arc(cx + ox, cy + oy, r, 0, Math.PI * 2); ctx.fill();
     });
-});
+}, 1, 1, 'enemyEmblemTex');
 
 // ============================================================================
 // REBUILT STARCRAFT II MULTI-CHANNEL PROCEDURAL PBR TEXTURE SUITE
@@ -248,9 +282,10 @@ const _terranArmorCanvases = (() => {
     return { albedo, roughness, normal };
 })();
 
-const metalTex = _terranArmorCanvases.albedo;
-const metalRoughnessTex = _terranArmorCanvases.roughness;
-const metalNormalTex = _terranArmorCanvases.normal;
+const metalTex = window.registerGameTexture('metalTex', _terranArmorCanvases.albedo, 'terran');
+const metalRoughnessTex = window.registerGameTexture('metalRoughnessTex', _terranArmorCanvases.roughness, 'terran');
+const metalNormalTex = window.registerGameTexture('metalNormalTex', _terranArmorCanvases.normal, 'terran');
+window.metalTex = metalTex;
 window.metalNormalTex = metalNormalTex;
 window.metalRoughnessTex = metalRoughnessTex;
 
@@ -265,7 +300,6 @@ const hazardTex = makeProceduralTexture((ctx, w, h) => {
         ctx.lineTo(i + 32 - h, h); ctx.lineTo(i - h, h);
         ctx.fill();
     }
-    // Weathering & metal wear speckles
     for (let s = 0; s < 900; s++) {
         ctx.fillStyle = s % 2 === 0 ? 'rgba(20, 24, 30, 0.14)' : 'rgba(215, 225, 235, 0.10)';
         ctx.fillRect(Math.random() * w, Math.random() * h, 2 + Math.random() * 8, 1.5 + Math.random() * 3);
@@ -273,151 +307,215 @@ const hazardTex = makeProceduralTexture((ctx, w, h) => {
     ctx.strokeStyle = 'rgba(15, 20, 28, 0.65)';
     ctx.lineWidth = 6;
     ctx.strokeRect(3, 3, w - 6, h - 6);
-}, 1, 1);
+}, 1, 1, 'hazardTex');
 
-// 3. Organic Zerg Chitin Carapace Normal Map (Smooth Striated Plates — Zero Pattern Dots)
-const chitinNormalTex = (() => {
-    const c = document.createElement('canvas');
-    c.width = 256; c.height = 256;
-    const ctx = c.getContext('2d');
-    ctx.fillStyle = '#808080';
-    ctx.fillRect(0, 0, 256, 256);
+// 3. Organic Zerg Chitin Albedo, Normal & Roughness Maps (With Independent Error Boundary)
+const _zergChitinCanvases = (() => {
+    try {
+        const c = document.createElement('canvas');
+        c.width = 256; c.height = 256;
+        const ctx = c.getContext('2d');
+        ctx.fillStyle = '#d4cad2';
+        ctx.fillRect(0, 0, 256, 256);
 
-    // Smooth overlapping longitudinal chitin plate bands (no circular dots or spots)
-    for (let y = 0; y < 256; y += 32) {
-        const g = ctx.createLinearGradient(0, y, 0, y + 32);
-        g.addColorStop(0, 'rgba(195, 195, 195, 0.38)');
-        g.addColorStop(0.55, 'rgba(128, 128, 128, 0.15)');
-        g.addColorStop(1, 'rgba(65, 65, 65, 0.42)');
-        ctx.fillStyle = g;
-        ctx.fillRect(0, y, 256, 32);
-    }
+        const rCanvas = document.createElement('canvas');
+        rCanvas.width = 256; rCanvas.height = 256;
+        const rCtx = rCanvas.getContext('2d');
+        rCtx.fillStyle = '#707070';
+        rCtx.fillRect(0, 0, 256, 256);
 
-    // Flowing organic carapace seam ridges
-    ctx.strokeStyle = 'rgba(42, 42, 42, 0.42)';
-    ctx.lineWidth = 2.2;
-    for (let y = 16; y < 256; y += 32) {
-        ctx.beginPath();
-        ctx.moveTo(0, y);
-        for (let x = 0; x <= 256; x += 16) {
-            ctx.lineTo(x, y + Math.sin(x * 0.049) * 3.0);
+        // Smooth overlapping longitudinal chitin plate bands (high base luminance so material colors stay rich)
+        for (let y = 0; y < 256; y += 32) {
+            const g = ctx.createLinearGradient(0, y, 0, y + 32);
+            g.addColorStop(0, 'rgba(245, 238, 244, 0.55)');
+            g.addColorStop(0.55, 'rgba(212, 200, 210, 0.35)');
+            g.addColorStop(1, 'rgba(158, 144, 156, 0.52)');
+            ctx.fillStyle = g;
+            ctx.fillRect(0, y, 256, 32);
+
+            const rg = rCtx.createLinearGradient(0, y, 0, y + 32);
+            rg.addColorStop(0, '#525252');
+            rg.addColorStop(0.7, '#787878');
+            rg.addColorStop(1, '#a8a8a8');
+            rCtx.fillStyle = rg;
+            rCtx.fillRect(0, y, 256, 32);
         }
-        ctx.stroke();
+
+        // Flowing organic carapace seam ridges
+        ctx.strokeStyle = 'rgba(96, 82, 94, 0.45)';
+        ctx.lineWidth = 2.2;
+        for (let y = 16; y < 256; y += 32) {
+            ctx.beginPath();
+            ctx.moveTo(0, y);
+            for (let x = 0; x <= 256; x += 16) {
+                ctx.lineTo(x, y + Math.sin(x * 0.049) * 3.0);
+            }
+            ctx.stroke();
+        }
+        const albedo = new THREE.CanvasTexture(c);
+        albedo.wrapS = THREE.RepeatWrapping; albedo.wrapT = THREE.RepeatWrapping;
+        albedo.repeat.set(2, 2);
+        const roughness = new THREE.CanvasTexture(rCanvas);
+        roughness.wrapS = THREE.RepeatWrapping; roughness.wrapT = THREE.RepeatWrapping;
+        roughness.repeat.set(2, 2);
+        const normal = generateNormalMapFromHeightCanvas(c, 2.8, 2, 2);
+        return { albedo, roughness, normal };
+    } catch (err) {
+        if (window.APP_ERROR_HANDLER) window.APP_ERROR_HANDLER.record('zergChitinTextures', err, 'graphics');
+        return { albedo: _whiteFallbackTex, roughness: _whiteFallbackTex, normal: _neutralNormalTex };
     }
-    return generateNormalMapFromHeightCanvas(c, 2.8, 2, 2);
 })();
+const zergChitinTex = window.registerGameTexture('zergChitinTex', _zergChitinCanvases.albedo, 'zerg');
+const zergRoughnessTex = window.registerGameTexture('zergRoughnessTex', _zergChitinCanvases.roughness, 'zerg');
+const zergNormalTex = window.registerGameTexture('zergNormalTex', _zergChitinCanvases.normal, 'zerg');
+const chitinNormalTex = window.registerGameTexture('chitinNormalTex', zergNormalTex, 'zerg');
+window.zergChitinTex = zergChitinTex;
+window.zergRoughnessTex = zergRoughnessTex;
+window.zergNormalTex = zergNormalTex;
 window.chitinNormalTex = chitinNormalTex;
 
-// 4. Protoss Solaris Khalai Geometric Filigree Normal Map
-const solarisFiligreeTex = (() => {
-    const c = document.createElement('canvas');
-    c.width = 256; c.height = 256;
-    const ctx = c.getContext('2d');
-    ctx.fillStyle = '#909090';
-    ctx.fillRect(0, 0, 256, 256);
-    ctx.strokeStyle = '#303030';
-    ctx.lineWidth = 3;
-    // Sacred Khalai geometric circuit conduits & diamond inlays
-    for (let ring = 28; ring <= 112; ring += 28) {
-        ctx.beginPath(); ctx.arc(128, 128, ring, 0, Math.PI * 2); ctx.stroke();
+// 4. Protoss Solaris Khalai Geometric Filigree Albedo, Normal & Roughness Maps
+const _solarisArmorCanvases = (() => {
+    try {
+        const c = document.createElement('canvas');
+        c.width = 256; c.height = 256;
+        const ctx = c.getContext('2d');
+        ctx.fillStyle = '#e8dfc8';
+        ctx.fillRect(0, 0, 256, 256);
+
+        const rCanvas = document.createElement('canvas');
+        rCanvas.width = 256; rCanvas.height = 256;
+        const rCtx = rCanvas.getContext('2d');
+        rCtx.fillStyle = '#484848';
+        rCtx.fillRect(0, 0, 256, 256);
+
+        ctx.strokeStyle = 'rgba(130, 112, 82, 0.55)';
+        ctx.lineWidth = 3;
+        rCtx.strokeStyle = '#969696';
+        rCtx.lineWidth = 3;
+        for (let ring = 28; ring <= 112; ring += 28) {
+            ctx.beginPath(); ctx.arc(128, 128, ring, 0, Math.PI * 2); ctx.stroke();
+            rCtx.beginPath(); rCtx.arc(128, 128, ring, 0, Math.PI * 2); rCtx.stroke();
+        }
+        for (let a = 0; a < 8; a++) {
+            const ang = (a / 8) * Math.PI * 2;
+            ctx.beginPath();
+            ctx.moveTo(128 + Math.cos(ang) * 28, 128 + Math.sin(ang) * 28);
+            ctx.lineTo(128 + Math.cos(ang) * 120, 128 + Math.sin(ang) * 120);
+            ctx.stroke();
+        }
+        ctx.strokeRect(18, 18, 220, 220);
+        const albedo = new THREE.CanvasTexture(c);
+        albedo.wrapS = THREE.RepeatWrapping; albedo.wrapT = THREE.RepeatWrapping;
+        const roughness = new THREE.CanvasTexture(rCanvas);
+        roughness.wrapS = THREE.RepeatWrapping; roughness.wrapT = THREE.RepeatWrapping;
+        const normal = generateNormalMapFromHeightCanvas(c, 2.8, 1, 1);
+        return { albedo, roughness, normal };
+    } catch (err) {
+        if (window.APP_ERROR_HANDLER) window.APP_ERROR_HANDLER.record('solarisArmorTextures', err, 'graphics');
+        return { albedo: _whiteFallbackTex, roughness: _whiteFallbackTex, normal: _neutralNormalTex };
     }
-    for (let a = 0; a < 8; a++) {
-        const ang = (a / 8) * Math.PI * 2;
-        ctx.beginPath();
-        ctx.moveTo(128 + Math.cos(ang) * 28, 128 + Math.sin(ang) * 28);
-        ctx.lineTo(128 + Math.cos(ang) * 120, 128 + Math.sin(ang) * 120);
-        ctx.stroke();
-    }
-    ctx.strokeRect(18, 18, 220, 220);
-    return generateNormalMapFromHeightCanvas(c, 2.8, 1, 1);
 })();
+const solarisArmorTex = window.registerGameTexture('solarisArmorTex', _solarisArmorCanvases.albedo, 'solaris');
+const solarisRoughnessTex = window.registerGameTexture('solarisRoughnessTex', _solarisArmorCanvases.roughness, 'solaris');
+const solarisNormalTex = window.registerGameTexture('solarisNormalTex', _solarisArmorCanvases.normal, 'solaris');
+const solarisFiligreeTex = window.registerGameTexture('solarisFiligreeTex', solarisNormalTex, 'solaris');
+window.solarisArmorTex = solarisArmorTex;
+window.solarisRoughnessTex = solarisRoughnessTex;
+window.solarisNormalTex = solarisNormalTex;
 window.solarisFiligreeTex = solarisFiligreeTex;
 
 // 5. 512x512 Seamless Koprulu Highland Turf, Soil & Sedimentary Micro-Detail Texture + Normal Map
+// High-luminance neutral micro-detail (216..252) so terrain vertex colors remain bright and vivid on all GPUs!
 const _terrainCanvases = (() => {
-    const size = 512;
-    const c = document.createElement('canvas');
-    c.width = size; c.height = size;
-    const ctx = c.getContext('2d');
-    const imgData = ctx.createImageData(size, size);
-    const data = imgData.data;
+    try {
+        const size = 512;
+        const c = document.createElement('canvas');
+        c.width = size; c.height = size;
+        const ctx = c.getContext('2d');
+        const imgData = ctx.createImageData(size, size);
+        const data = imgData.data;
 
-    function hash2D(ix, iy, period) {
-        const x = ((ix % period) + period) % period;
-        const y = ((iy % period) + period) % period;
-        const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453123;
-        return n - Math.floor(n);
-    }
-
-    function valueNoisePeriodic(u, v, freq) {
-        const px = u * freq;
-        const py = v * freq;
-        const ix = Math.floor(px);
-        const iy = Math.floor(py);
-        const fx = px - ix;
-        const fy = py - iy;
-        const sx = fx * fx * (3.0 - 2.0 * fx);
-        const sy = fy * fy * (3.0 - 2.0 * fy);
-
-        const n00 = hash2D(ix, iy, freq);
-        const n10 = hash2D(ix + 1, iy, freq);
-        const n01 = hash2D(ix, iy + 1, freq);
-        const n11 = hash2D(ix + 1, iy + 1, freq);
-
-        const nx0 = n00 + sx * (n10 - n00);
-        const nx1 = n01 + sx * (n11 - n01);
-        return nx0 + sy * (nx1 - nx0);
-    }
-
-    for (let y = 0; y < size; y++) {
-        const v = y / size;
-        for (let x = 0; x < size; x++) {
-            const u = x / size;
-            const n1 = valueNoisePeriodic(u, v, 6);
-            const n2 = valueNoisePeriodic(u, v, 16);
-            const n3 = valueNoisePeriodic(u, v, 38);
-            const n4 = valueNoisePeriodic(u, v, 84);
-            const fbm = n1 * 0.40 + n2 * 0.30 + n3 * 0.20 + n4 * 0.10;
-
-            const bladeTuft = Math.sin((u * 48.0 + n2 * 2.1) * Math.PI * 2) * Math.cos((v * 48.0 - n1 * 2.1) * Math.PI * 2) * 0.045;
-            const microGrain = (hash2D(x, y, size) - 0.5) * 0.055;
-
-            const lum = Math.min(188, Math.max(118, Math.floor(138 + fbm * 42 + (bladeTuft + microGrain) * 180)));
-            const r = Math.max(0, Math.min(255, lum - Math.floor(n2 * 10)));
-            const g = Math.max(0, Math.min(255, lum + Math.floor((n1 - 0.35) * 12)));
-            const b = Math.max(0, Math.min(255, lum - Math.floor(n3 * 10)));
-
-            const p = (y * size + x) * 4;
-            data[p] = r;
-            data[p + 1] = g;
-            data[p + 2] = b;
-            data[p + 3] = 255;
+        function hash2D(ix, iy, period) {
+            const x = ((ix % period) + period) % period;
+            const y = ((iy % period) + period) % period;
+            const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453123;
+            return n - Math.floor(n);
         }
-    }
-    ctx.putImageData(imgData, 0, 0);
 
-    // Organic soil pebbles & fine botanical blades
-    for (let i = 0; i < 2800; i++) {
-        const gx = Math.random() * size;
-        const gy = Math.random() * size;
-        ctx.strokeStyle = i % 3 === 0 ? 'rgba(225, 245, 215, 0.13)' : 'rgba(135, 180, 125, 0.12)';
-        ctx.lineWidth = 1.2;
-        ctx.beginPath();
-        ctx.moveTo(gx, gy);
-        ctx.lineTo(gx + (Math.random() - 0.5) * 3.8, gy - 3.5 - Math.random() * 4.5);
-        ctx.stroke();
-    }
+        function valueNoisePeriodic(u, v, freq) {
+            const px = u * freq;
+            const py = v * freq;
+            const ix = Math.floor(px);
+            const iy = Math.floor(py);
+            const fx = px - ix;
+            const fy = py - iy;
+            const sx = fx * fx * (3.0 - 2.0 * fx);
+            const sy = fy * fy * (3.0 - 2.0 * fy);
 
-    const tex = new THREE.CanvasTexture(c);
-    tex.wrapS = THREE.RepeatWrapping;
-    tex.wrapT = THREE.RepeatWrapping;
-    tex.repeat.set(24, 24);
-    const norm = generateNormalMapFromHeightCanvas(c, 2.8, 24, 24);
-    return { tex, norm };
+            const n00 = hash2D(ix, iy, freq);
+            const n10 = hash2D(ix + 1, iy, freq);
+            const n01 = hash2D(ix, iy + 1, freq);
+            const n11 = hash2D(ix + 1, iy + 1, freq);
+
+            const nx0 = n00 + sx * (n10 - n00);
+            const nx1 = n01 + sx * (n11 - n01);
+            return nx0 + sy * (nx1 - nx0);
+        }
+
+        for (let y = 0; y < size; y++) {
+            const v = y / size;
+            for (let x = 0; x < size; x++) {
+                const u = x / size;
+                const n1 = valueNoisePeriodic(u, v, 6);
+                const n2 = valueNoisePeriodic(u, v, 16);
+                const n3 = valueNoisePeriodic(u, v, 38);
+                const n4 = valueNoisePeriodic(u, v, 84);
+                const fbm = n1 * 0.40 + n2 * 0.30 + n3 * 0.20 + n4 * 0.10;
+
+                const bladeTuft = Math.sin((u * 48.0 + n2 * 2.1) * Math.PI * 2) * Math.cos((v * 48.0 - n1 * 2.1) * Math.PI * 2) * 0.032;
+                const microGrain = (hash2D(x, y, size) - 0.5) * 0.04;
+
+                const lum = Math.min(252, Math.max(214, Math.floor(224 + fbm * 24 + (bladeTuft + microGrain) * 110)));
+                const r = Math.max(0, Math.min(255, lum - Math.floor(n2 * 5)));
+                const g = Math.max(0, Math.min(255, lum + Math.floor((n1 - 0.35) * 7)));
+                const b = Math.max(0, Math.min(255, lum - Math.floor(n3 * 5)));
+
+                const p = (y * size + x) * 4;
+                data[p] = r;
+                data[p + 1] = g;
+                data[p + 2] = b;
+                data[p + 3] = 255;
+            }
+        }
+        ctx.putImageData(imgData, 0, 0);
+
+        for (let i = 0; i < 2400; i++) {
+            const gx = Math.random() * size;
+            const gy = Math.random() * size;
+            ctx.strokeStyle = i % 3 === 0 ? 'rgba(250, 255, 245, 0.16)' : 'rgba(205, 225, 200, 0.14)';
+            ctx.lineWidth = 1.2;
+            ctx.beginPath();
+            ctx.moveTo(gx, gy);
+            ctx.lineTo(gx + (Math.random() - 0.5) * 3.8, gy - 3.5 - Math.random() * 4.5);
+            ctx.stroke();
+        }
+
+        const tex = new THREE.CanvasTexture(c);
+        tex.wrapS = THREE.RepeatWrapping;
+        tex.wrapT = THREE.RepeatWrapping;
+        tex.repeat.set(24, 24);
+        const norm = generateNormalMapFromHeightCanvas(c, 2.6, 24, 24);
+        return { tex, norm };
+    } catch (err) {
+        if (window.APP_ERROR_HANDLER) window.APP_ERROR_HANDLER.record('terrainCanvases', err, 'graphics');
+        return { tex: _whiteFallbackTex, norm: _neutralNormalTex };
+    }
 })();
 
-const terrainDetailTex = _terrainCanvases.tex;
-const terrainNormalTex = _terrainCanvases.norm;
+const terrainDetailTex = window.registerGameTexture('terrainDetailTex', _terrainCanvases.tex, 'terrain');
+const terrainNormalTex = window.registerGameTexture('terrainNormalTex', _terrainCanvases.norm, 'terrain');
+window.terrainDetailTex = terrainDetailTex;
 window.terrainNormalTex = terrainNormalTex;
 
 const waterTex = makeProceduralTexture((ctx, w, h) => {
@@ -428,7 +526,7 @@ const waterTex = makeProceduralTexture((ctx, w, h) => {
         ctx.arc(Math.random() * w, Math.random() * h, 10 + Math.random() * 24, 0, Math.PI);
         ctx.stroke();
     }
-}, 10, 10);
+}, 10, 10, 'waterTex');
 
 // ============================================================================
 // 2. SCENE, CAMERA, ACES FILMIC RENDERER & PROCEDURAL HDR SKY ENVIRONMENT MAP
@@ -572,6 +670,10 @@ const PERF_MANAGER = {
     lowLoadTimer: 0,
     frameCounter: 0,
 
+    applyTier(key) {
+        this.applyProfile(key);
+    },
+
     applyProfile(key) {
         if (!this.profiles[key]) return;
         this.currentKey = key;
@@ -581,10 +683,21 @@ const PERF_MANAGER = {
             renderer.setPixelRatio(targetDpr);
             renderer.setSize(window.innerWidth, window.innerHeight, false);
         }
+        const shadowChanged = (renderer.shadowMap.enabled !== !!this.current.shadowEnabled)
+            || (typeof dirLight !== 'undefined' && dirLight && dirLight.castShadow !== !!this.current.shadowEnabled);
+        renderer.shadowMap.enabled = !!this.current.shadowEnabled;
         if (typeof dirLight !== 'undefined' && dirLight) {
-            if (dirLight.castShadow !== this.current.shadowEnabled) {
-                dirLight.castShadow = this.current.shadowEnabled;
-                renderer.shadowMap.needsUpdate = true;
+            dirLight.castShadow = !!this.current.shadowEnabled;
+        }
+        if (shadowChanged) {
+            renderer.shadowMap.needsUpdate = true;
+            if (typeof scene !== 'undefined' && scene) {
+                scene.traverse(obj => {
+                    if (obj && obj.isMesh && obj.material) {
+                        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+                        mats.forEach(m => { if (m) m.needsUpdate = true; });
+                    }
+                });
             }
         }
     },
@@ -919,10 +1032,16 @@ renderer.domElement.addEventListener('webglcontextrestored', () => {
     GRAPHICS_DIAGNOSTICS.contextRestoreCount++;
     GRAPHICS_DIAGNOSTICS.lastContextEventTime = new Date().toISOString();
     try {
-        [terrainDetailTex, terrainNormalTex, metalTex, metalNormalTex, zergChitinTex, zergNormalTex, solarisArmorTex, _fallbackFowTex, creepOverlayTex].forEach(tex => {
-            if (tex && tex.isTexture) tex.needsUpdate = true;
-        });
-        if (typeof fowTexture !== 'undefined' && fowTexture) {
+        // Safely iterate through centralized TEXTURE_REGISTRY so no undeclared variable can ever throw ReferenceError
+        if (window.TEXTURE_REGISTRY && typeof window.TEXTURE_REGISTRY === 'object') {
+            Object.keys(window.TEXTURE_REGISTRY).forEach(texName => {
+                const tex = window.TEXTURE_REGISTRY[texName];
+                if (tex && tex.isTexture) {
+                    tex.needsUpdate = true;
+                }
+            });
+        }
+        if (typeof fowTexture !== 'undefined' && fowTexture && fowTexture.isTexture) {
             fowTexture.needsUpdate = true;
         }
         scene.traverse(obj => {
@@ -946,7 +1065,9 @@ renderer.domElement.addEventListener('webglcontextrestored', () => {
             }
         }, 4000);
     } catch (err) {
-        GRAPHICS_DIAGNOSTICS.recordShaderError(`Context restore error: ${err && err.message ? err.message : String(err)}`);
+        const errMsg = `Context restore error: ${err && err.message ? err.message : String(err)}`;
+        GRAPHICS_DIAGNOSTICS.recordShaderError(errMsg);
+        if (window.APP_ERROR_HANDLER) window.APP_ERROR_HANDLER.record('webglcontextrestored', err, 'graphics');
     }
 });
 
@@ -1578,6 +1699,7 @@ let nextWaterRippleSlot = 0;
 const _fallbackFowBytes = new Uint8Array([255, 255, 255, 0]);
 const _fallbackFowTex = new THREE.DataTexture(_fallbackFowBytes, 1, 1, THREE.RGBAFormat);
 _fallbackFowTex.needsUpdate = true;
+window.registerGameTexture('_fallbackFowTex', _fallbackFowTex, 'fow');
 const _sharedFowFlag = { value: 0.0 };
 const _sharedMapSize = { value: 260.0 };
 const _sharedTitleFlag = { value: 1.0 };
@@ -2186,7 +2308,8 @@ const creepOverlayTex = makeProceduralTexture((ctx, w, h) => {
         }
     }
     ctx.putImageData(imgData, 0, 0);
-}, 1, 1);
+}, 1, 1, 'creepOverlayTex');
+window.creepOverlayTex = creepOverlayTex;
 
 const MAX_CREEP_SHADER_NODES = 8;
 const _defaultCreepNodes = Array.from({ length: MAX_CREEP_SHADER_NODES }, () => new THREE.Vector3(-9999, -9999, 0));
@@ -3594,11 +3717,11 @@ const MAT = {
     acidGlow: new THREE.MeshStandardMaterial({ color: 0x7ec812, emissive: 0x285400, emissiveIntensity: 0.30, roughness: 0.36, metalness: 0.14 }),
     volatileGlow: new THREE.MeshStandardMaterial({ color: 0xe0520c, emissive: 0x7a1c00, emissiveIntensity: 0.34, roughness: 0.36, metalness: 0.18 }),
     hiveVeinGlow: new THREE.MeshStandardMaterial({ color: 0x9c28b4, emissive: 0x420856, emissiveIntensity: 0.28, roughness: 0.38, metalness: 0.18 }),
-    zergFlesh: new THREE.MeshStandardMaterial({ color: 0x581634, roughness: 0.42, metalness: 0.12 }),
-    chitinDark: new THREE.MeshStandardMaterial({ color: 0x26182c, roughness: 0.44, metalness: 0.24 }),
-    chitinRed: new THREE.MeshStandardMaterial({ color: 0x761a30, roughness: 0.42, metalness: 0.20 }),
-    chitinGreen: new THREE.MeshStandardMaterial({ color: 0x385818, roughness: 0.44, metalness: 0.16 }),
-    chitinArmor: new THREE.MeshStandardMaterial({ color: 0x4a3626, roughness: 0.42, metalness: 0.28 }),
+    zergFlesh: new THREE.MeshStandardMaterial({ color: 0x6b1d40, map: zergChitinTex, normalMap: zergNormalTex, normalScale: new THREE.Vector2(0.45, 0.45), roughnessMap: zergRoughnessTex, roughness: 0.42, metalness: 0.12 }),
+    chitinDark: new THREE.MeshStandardMaterial({ color: 0x34203c, map: zergChitinTex, normalMap: zergNormalTex, normalScale: new THREE.Vector2(0.55, 0.55), roughnessMap: zergRoughnessTex, roughness: 0.44, metalness: 0.24 }),
+    chitinRed: new THREE.MeshStandardMaterial({ color: 0x8c223c, map: zergChitinTex, normalMap: zergNormalTex, normalScale: new THREE.Vector2(0.55, 0.55), roughnessMap: zergRoughnessTex, roughness: 0.42, metalness: 0.20 }),
+    chitinGreen: new THREE.MeshStandardMaterial({ color: 0x466b20, map: zergChitinTex, normalMap: zergNormalTex, normalScale: new THREE.Vector2(0.50, 0.50), roughnessMap: zergRoughnessTex, roughness: 0.44, metalness: 0.16 }),
+    chitinArmor: new THREE.MeshStandardMaterial({ color: 0x5c4432, map: zergChitinTex, normalMap: zergNormalTex, normalScale: new THREE.Vector2(0.55, 0.55), roughnessMap: zergRoughnessTex, roughness: 0.42, metalness: 0.28 }),
     goreMeat: new THREE.MeshStandardMaterial({ color: 0x6e0b0b, roughness: 0.30, metalness: 0.12 }),
     crimsonBlood: new THREE.MeshStandardMaterial({ color: 0x9e0814, roughness: 0.22, metalness: 0.14 }),
     xenoIchorGreen: new THREE.MeshStandardMaterial({ color: 0x68e004, emissive: 0x225500, emissiveIntensity: 0.28, roughness: 0.28, metalness: 0.14 }),
@@ -3606,15 +3729,16 @@ const MAT = {
     scaffoldWire: new THREE.MeshBasicMaterial({ color: 0x38bdf8, wireframe: true, transparent: true, opacity: 0.55 }),
     humanHoloMat: new THREE.MeshBasicMaterial({ map: humanEmblemTex, transparent: true, opacity: 0.88, side: THREE.DoubleSide, depthWrite: false }),
     enemyHoloMat: new THREE.MeshBasicMaterial({ map: enemyEmblemTex, transparent: true, opacity: 0.88, side: THREE.DoubleSide, depthWrite: false }),
-    terranBlue: new THREE.MeshStandardMaterial({ color: 0x346de0, map: metalTex, roughnessMap: metalRoughnessTex, roughness: 0.44, metalness: 0.28, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }),
-    terranCobalt: new THREE.MeshStandardMaterial({ color: 0x208ecc, map: metalTex, roughness: 0.42, metalness: 0.28, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }),
+    terranBlue: new THREE.MeshStandardMaterial({ color: 0x346de0, map: metalTex, normalMap: metalNormalTex, normalScale: new THREE.Vector2(0.35, 0.35), roughnessMap: metalRoughnessTex, roughness: 0.44, metalness: 0.28, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }),
+    terranCobalt: new THREE.MeshStandardMaterial({ color: 0x208ecc, map: metalTex, normalMap: metalNormalTex, normalScale: new THREE.Vector2(0.35, 0.35), roughness: 0.42, metalness: 0.28, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }),
     terranTrim: new THREE.MeshStandardMaterial({ color: 0x20bcd6, roughness: 0.36, metalness: 0.38, emissive: 0x00283d, emissiveIntensity: 0.22 }),
-    terranPlating: new THREE.MeshStandardMaterial({ color: 0x7288a0, map: metalTex, roughnessMap: metalRoughnessTex, roughness: 0.46, metalness: 0.30 }),
-    zergTeamPurple: new THREE.MeshStandardMaterial({ color: 0x641468, roughness: 0.40, metalness: 0.22, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }),
-    zergTeamCrimson: new THREE.MeshStandardMaterial({ color: 0x8a0e30, roughness: 0.40, metalness: 0.20, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }),
-    zergTeamGreen: new THREE.MeshStandardMaterial({ color: 0x426a0c, roughness: 0.42, metalness: 0.18, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }),
+    terranPlating: new THREE.MeshStandardMaterial({ color: 0x7288a0, map: metalTex, normalMap: metalNormalTex, normalScale: new THREE.Vector2(0.35, 0.35), roughnessMap: metalRoughnessTex, roughness: 0.46, metalness: 0.30 }),
+    zergTeamPurple: new THREE.MeshStandardMaterial({ color: 0x781c7c, map: zergChitinTex, normalMap: zergNormalTex, normalScale: new THREE.Vector2(0.45, 0.45), roughness: 0.40, metalness: 0.22, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }),
+    zergTeamCrimson: new THREE.MeshStandardMaterial({ color: 0x9c163c, map: zergChitinTex, normalMap: zergNormalTex, normalScale: new THREE.Vector2(0.45, 0.45), roughness: 0.40, metalness: 0.20, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }),
+    zergTeamGreen: new THREE.MeshStandardMaterial({ color: 0x4e7c12, map: zergChitinTex, normalMap: zergNormalTex, normalScale: new THREE.Vector2(0.45, 0.45), roughness: 0.42, metalness: 0.18, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }),
     medicDecalCross: new THREE.MeshStandardMaterial({ color: 0xd61840, roughness: 0.38, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 })
 };
+window.MAT = MAT;
 
 // Apply Fog of War, Night/Sun Shading & Cloud Shadow Shader to ALL Standard Building/Structure & Accent Materials
 [

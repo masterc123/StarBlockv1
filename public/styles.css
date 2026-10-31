@@ -1489,15 +1489,27 @@ body {
     display: none !important;
 }
 
+/* Hide Unit & Building HP Bars and Floating Health Indicators when disabled in Settings */
+#game-container.hud-hide-hpbars .hp-pip,
+#game-container.hud-hide-hpbars .combat-float {
+    display: none !important;
+}
+
 /* Automatic clean mobile defaults so UI never overwhelms small viewports */
 @media (max-width: 768px) {
     .desktop-only-hud-btn,
     .res-item-secondary,
     #sc2-objective-pill,
-    #sc2-axis-ball-widget,
     #mobile-hint,
     #red-border-glow-frame {
         display: none !important;
+    }
+    #sc2-axis-ball-widget {
+        top: 40px !important;
+        right: 6px !important;
+        transform: scale(0.84);
+        transform-origin: top right;
+        display: flex !important;
     }
     #sc2-top-hud {
         padding: 4px 6px !important;

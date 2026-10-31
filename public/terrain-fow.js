@@ -5091,6 +5091,7 @@ function flattenTerrainUnderBuilding(cx, cz, flatRadius = 3.2, blendRadius = 2.2
 window.flattenTerrainUnderBuilding = flattenTerrainUnderBuilding;
 
 const terrainMat = new THREE.MeshStandardMaterial({
+    name: 'KopruluTerrainMaterial',
     vertexColors: true,
     map: terrainDetailTex,
     roughness: 0.78,
@@ -5102,6 +5103,8 @@ if (typeof SHADER_ENGINE !== 'undefined' && SHADER_ENGINE.applyTerrainShader) {
 const terrainMesh = new THREE.Mesh(terrainGeo, terrainMat);
 terrainMesh.receiveShadow = true;
 scene.add(terrainMesh);
+window.terrainMat = terrainMat;
+window.terrainMesh = terrainMesh;
 
 function buildBridgeBarriers() {
     // River barrier walls removed per user request so riverbanks remain open and unobstructed
@@ -5120,6 +5123,10 @@ const fowImgData = fowCtx.createImageData(FOW_RES, FOW_RES);
 const fowTexture = new THREE.CanvasTexture(fowCanvas);
 fowTexture.minFilter = THREE.LinearFilter;
 fowTexture.magFilter = THREE.LinearFilter;
+if (typeof window.registerGameTexture === 'function') {
+    window.registerGameTexture('fowTexture', fowTexture, 'fow');
+}
+window.fowTexture = fowTexture;
 
 function preseedInitialFogOfWarCanvas() {
     const data = fowImgData.data;

@@ -239,6 +239,10 @@ export default function App() {
     subtitle: 'High-Altitude Tactical Sector-09 Overview',
     progress: 0
   });
+  const [cinematicViewMode, setCinematicViewMode] = useState<'auto' | 'birds_eye' | 'ground_operator'>('auto');
+  const [campaignDropdownOpen, setCampaignDropdownOpen] = useState<boolean>(false);
+  const campaignHoldTimerRef = useRef<number | null>(null);
+  const campaignHoldTriggeredRef = useRef<boolean>(false);
   const initRunningRef = useRef<boolean>(false);
 
   // Multiplayer Anti-Leave Penalty, Connection Ping, Share Resources & Anti-Cheat State
@@ -401,6 +405,72 @@ export default function App() {
     window.loadingCameraSweep = true;
     setLoadingStage(1);
     setPhase('loading_match');
+  }, []);
+
+  const clearCampaignHoldTimer = useCallback(() => {
+    if (campaignHoldTimerRef.current !== null) {
+      window.clearTimeout(campaignHoldTimerRef.current);
+      campaignHoldTimerRef.current = null;
+    }
+  }, []);
+
+  const handleCampaignPointerDown = useCallback((e: React.PointerEvent<HTMLButtonElement>) => {
+    if (e.button !== undefined && e.button !== 0) return;
+    campaignHoldTriggeredRef.current = false;
+    clearCampaignHoldTimer();
+    campaignHoldTimerRef.current = window.setTimeout(() => {
+      campaignHoldTriggeredRef.current = true;
+      setCampaignDropdownOpen(true);
+      if (window.SFX) window.SFX.playClick();
+    }, 420);
+  }, [clearCampaignHoldTimer]);
+
+  const handleCampaignPointerUp = useCallback(() => {
+    const wasHold = campaignHoldTriggeredRef.current;
+    clearCampaignHoldTimer();
+    if (!wasHold) {
+      handleStartCampaignGame();
+    }
+  }, [clearCampaignHoldTimer, handleStartCampaignGame]);
+
+  const handleCampaignPointerCancel = useCallback(() => {
+    clearCampaignHoldTimer();
+  }, [clearCampaignHoldTimer]);
+
+  const handleRegenerateCampaignMap = useCallback(() => {
+    if (typeof (window as any).resetMatchForNewMap === 'function' && window.regenerateDynamicSectorMap) {
+      const newSeed = Math.floor(100 + Math.random() * 899);
+      window.regenerateDynamicSectorMap(newSeed, []);
+      (window as any).resetMatchForNewMap(newSeed);
+      setMapSeedDisplay(window.MAP_SEED || newSeed);
+      setMapArchetypeDisplay(window.MAP_ARCHETYPE || 'open_badlands');
+      setBridgeCountDisplay(window.BRIDGES ? window.BRIDGES.length : 0);
+    } else if (window.regenerateDynamicSectorMap) {
+      const seed = window.regenerateDynamicSectorMap(undefined, []);
+      setMapSeedDisplay(window.MAP_SEED || seed);
+      setMapArchetypeDisplay(window.MAP_ARCHETYPE || 'open_badlands');
+      setBridgeCountDisplay(window.BRIDGES ? window.BRIDGES.length : 0);
+    }
+    if (window.SFX) window.SFX.playClick();
+  }, []);
+
+  const handleBackFromCampaignToMenu = useCallback(() => {
+    window.loadingCameraSweep = false;
+    initRunningRef.current = false;
+    window.titleScreenActive = true;
+    setCampaignDropdownOpen(false);
+    setPhase('menu');
+    if (window.SFX) window.SFX.playClick();
+  }, []);
+
+  const handleChangeCinematicViewMode = useCallback((mode: 'auto' | 'birds_eye' | 'ground_operator') => {
+    setCinematicViewMode(mode);
+    if ((window as any).GAME_API && typeof (window as any).GAME_API.setBattleCinematicViewMode === 'function') {
+      (window as any).GAME_API.setBattleCinematicViewMode(mode);
+    } else if ((window as any).BATTLE_CINEMATIC && typeof (window as any).BATTLE_CINEMATIC.setCameraViewMode === 'function') {
+      (window as any).BATTLE_CINEMATIC.setCameraViewMode(mode);
+    }
+    if (window.SFX) window.SFX.playClick();
   }, []);
 
   // Multiplayer Battle.net Match Launch (enables chat, connection bars, resource sharing, anti-cheat, anti-leave)
@@ -1497,17 +1567,49 @@ export default function App() {
       {/* =========================================================================
           COMPACT MAIN MENU OVERLAY OVER LIVE 3D BATTLEFIELD CINEMATIC
           ========================================================================= */}
-      {phase === 'menu' && (
-        <div className="fixed inset-0 pointer-events-none flex flex-col justify-between p-4 sm:p-7">
-          {/* Top-Right Minimal Skip Button */}
-          <div className="flex justify-end pointer-events-auto">
-            <button
-              type="button"
-              onClick={handleStartCampaignGame}
-              className="px-3 py-1 bg-[#060d17]/75 hover:bg-[#00e5ff] text-[#93b4d4] hover:text-[#040810] border border-[#2b4463] hover:border-[#00e5ff] text-[10px] font-mono font-bold tracking-widest uppercase transition-colors cursor-pointer backdrop-blur-sm"
-            >
-              SKIP &raquo;
-            </button>
+      {(phase === 'menu' || ((phase === 'loading_match' || (phase === 'playing' && !isMultiplayerMatch)) && campaignDropdownOpen)) && (
+        <div className="fixed inset-0 pointer-events-none flex flex-col justify-between p-4 sm:p-7 z-40">
+          {/* Top-Right Minimal Skip / Cinematic Camera View Controls */}
+          <div className="flex items-center justify-end gap-1.5 pointer-events-auto">
+            {phase === 'menu' && (
+              <div className="flex items-center bg-[#060d17]/80 border border-[#2b4463] p-0.5 backdrop-blur-sm">
+                {([
+                  { id: 'auto', label: 'AUTO CAM' },
+                  { id: 'birds_eye', label: "BIRD'S-EYE" },
+                  { id: 'ground_operator', label: 'GROUND CAM' }
+                ] as const).map(cm => (
+                  <button
+                    key={cm.id}
+                    type="button"
+                    onClick={() => handleChangeCinematicViewMode(cm.id)}
+                    className={`px-2 py-0.5 text-[9px] font-mono font-bold uppercase transition-colors cursor-pointer ${
+                      cinematicViewMode === cm.id
+                        ? 'bg-[#00e5ff] text-[#040810]'
+                        : 'text-[#93b4d4] hover:text-white'
+                    }`}
+                  >
+                    {cm.label}
+                  </button>
+                ))}
+              </div>
+            )}
+            {phase === 'menu' ? (
+              <button
+                type="button"
+                onClick={handleStartCampaignGame}
+                className="px-3 py-1 bg-[#060d17]/75 hover:bg-[#00e5ff] text-[#93b4d4] hover:text-[#040810] border border-[#2b4463] hover:border-[#00e5ff] text-[10px] font-mono font-bold tracking-widest uppercase transition-colors cursor-pointer backdrop-blur-sm"
+              >
+                SKIP &raquo;
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleBackFromCampaignToMenu}
+                className="px-3 py-1 bg-[#1e1018]/90 hover:bg-[#ff2a4b] text-[#ff8fa3] hover:text-white border border-[#ff2a4b] text-[10px] font-mono font-bold tracking-widest uppercase transition-colors cursor-pointer backdrop-blur-sm"
+              >
+                &laquo; BACK TO MENU
+              </button>
+            )}
           </div>
 
           {/* Lower-Left Compact Command Overlay (Leaves >85% of viewport open to 3D Battle Cinematic) */}
@@ -1530,77 +1632,203 @@ export default function App() {
             </div>
 
             <div className="flex flex-col gap-2">
-              <button
-                data-testid="launch-campaign-btn"
-                onClick={handleStartCampaignGame}
-                className="w-full py-2.5 px-3.5 bg-[#00e5ff] text-[#040810] font-black text-xs tracking-widest uppercase hover:bg-[#38bdf8] border border-[#bbf7ff] transition-all cursor-pointer shadow-[0_0_16px_rgba(0,229,255,0.35)] flex items-center justify-between"
-              >
-                <span>CAMPAIGN</span>
-                <span className="text-[10px] font-mono font-bold">SINGLE PLAYER</span>
-              </button>
+              {phase === 'menu' ? (
+                <div className="relative flex flex-col gap-1">
+                  <button
+                    data-testid="launch-campaign-btn"
+                    onPointerDown={handleCampaignPointerDown}
+                    onPointerUp={handleCampaignPointerUp}
+                    onPointerCancel={handleCampaignPointerCancel}
+                    onPointerLeave={handleCampaignPointerCancel}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setCampaignDropdownOpen(prev => !prev);
+                    }}
+                    className="w-full py-2.5 px-3.5 bg-[#00e5ff] text-[#040810] font-black text-xs tracking-widest uppercase hover:bg-[#38bdf8] border border-[#bbf7ff] transition-all cursor-pointer shadow-[0_0_16px_rgba(0,229,255,0.35)] flex items-center justify-between select-none"
+                    title="Tap to Launch Campaign · Hold to Open Campaign Options"
+                  >
+                    <span>CAMPAIGN</span>
+                    <span className="text-[9px] font-mono font-bold">TAP / HOLD ▾</span>
+                  </button>
 
-              <button
-                onClick={() => {
-                  setPhase('multiplayer_browser');
-                  if (window.SFX) window.SFX.playClick();
-                  if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
-                    socketRef.current.send(JSON.stringify({ type: 'c:get_lobbies', clientKey: clientKeyRef.current }));
-                  }
-                }}
-                className="w-full py-2.5 px-3.5 bg-[#0d1c2e]/90 hover:bg-[#132840] text-[#00e5ff] font-extrabold text-xs tracking-widest uppercase border border-[#2b4c73] hover:border-[#00e5ff] transition-all cursor-pointer flex items-center justify-between"
-              >
-                <span>MULTIPLAYER</span>
-                <span className="text-[10px] font-mono text-[#00ff66]">LOBBIES</span>
-              </button>
-
-              <button
-                onClick={() => {
-                  if (window.SFX) {
-                    window.SFX.muted = !window.SFX.muted;
-                    window.SFX.playClick();
-                  }
-                  if (typeof (window as any).toggleHudSettingsModal === 'function') {
-                    (window as any).toggleHudSettingsModal();
-                  }
-                }}
-                className="w-full py-2 px-3.5 bg-[#091320]/90 hover:bg-[#0e1d30] text-[#93b4d4] font-bold text-[11px] tracking-wider uppercase border border-[#233852] transition-all cursor-pointer flex items-center justify-between"
-              >
-                <span>SETTINGS / AUDIO</span>
-                <span className="font-mono text-[10px] text-[#00e5ff]">{window.SFX?.muted ? 'MUTED' : 'ACTIVE'}</span>
-              </button>
-
-              {/* Procedural Planet Biome Selector */}
-              <div className="pt-2 mt-1 border-t border-[#1c314a]">
-                <div className="flex items-center justify-between text-[9px] font-mono text-[#88a8c8] uppercase mb-1.5">
-                  <span>PLANET BIOME</span>
-                  <span className="text-[#00e5ff] font-bold">{planetBiome.toUpperCase()}</span>
-                </div>
-                <div className="grid grid-cols-3 gap-1">
-                  {([
-                    { id: 'highland', label: 'HIGHLAND' },
-                    { id: 'desert', label: 'DESERT' },
-                    { id: 'ocean', label: 'OCEAN' },
-                    { id: 'lava', label: 'LAVA' },
-                    { id: 'jungle', label: 'JUNGLE' },
-                    { id: 'random', label: 'RANDOM' }
-                  ] as const).map(b => (
-                    <button
-                      key={b.id}
-                      type="button"
-                      onClick={() => handleSelectPlanetBiome(b.id)}
-                      className={`py-1 px-1.5 text-[9px] font-mono font-bold uppercase border transition-colors cursor-pointer ${
-                        planetBiome === b.id
-                          ? 'bg-[#00e5ff] text-[#040810] border-[#a5f3fc]'
-                          : 'bg-[#081321] text-[#8faecf] border-[#1f3754] hover:border-[#00e5ff]'
-                      }`}
+                  {campaignDropdownOpen && (
+                    <div
+                      data-testid="campaign-hold-dropdown"
+                      className="w-full bg-[#071322]/96 border border-[#00e5ff] shadow-[0_8px_24px_rgba(0,0,0,0.85)] p-1.5 flex flex-col gap-1 z-50"
                     >
-                      {b.label}
-                    </button>
-                  ))}
+                      <div className="flex items-center justify-between px-1.5 py-0.5 text-[9px] font-mono text-[#7dd3fc] border-b border-[#1e3a5f]">
+                        <span>CAMPAIGN COMMAND MENU</span>
+                        <button
+                          type="button"
+                          onClick={() => setCampaignDropdownOpen(false)}
+                          className="text-[#f87171] hover:text-white font-bold cursor-pointer px-1"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          handleStartCampaignGame();
+                        }}
+                        className="w-full py-1.5 px-2.5 bg-[#0c243d] hover:bg-[#00e5ff] text-[#e0f2fe] hover:text-[#040810] font-mono font-bold text-[10px] uppercase text-left transition-colors cursor-pointer flex items-center justify-between"
+                      >
+                        <span>▶ NEW CAMPAIGN</span>
+                        <span className="text-[9px] opacity-80">START</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          handleRegenerateCampaignMap();
+                        }}
+                        className="w-full py-1.5 px-2.5 bg-[#0c243d] hover:bg-[#00ff66] text-[#e0f2fe] hover:text-[#040810] font-mono font-bold text-[10px] uppercase text-left transition-colors cursor-pointer flex items-center justify-between"
+                      >
+                        <span>↻ REGENERATE MAP</span>
+                        <span className="text-[9px] opacity-80">SEED #{mapSeedDisplay}</span>
+                      </button>
+                    </div>
+                  )}
                 </div>
-              </div>
+              ) : (
+                <div className="flex flex-col gap-1">
+                  <button
+                    data-testid="campaign-back-btn"
+                    type="button"
+                    onClick={handleBackFromCampaignToMenu}
+                    className="w-full py-2.5 px-3.5 bg-[#ff2a4b] text-white font-black text-xs tracking-widest uppercase hover:bg-[#fb7185] border border-[#fecdd3] transition-all cursor-pointer shadow-[0_0_16px_rgba(255,42,75,0.35)] flex items-center justify-between"
+                  >
+                    <span>&laquo; BACK</span>
+                    <span className="text-[10px] font-mono font-bold">RETURN TO MENU</span>
+                  </button>
+
+                  {campaignDropdownOpen && (
+                    <div
+                      data-testid="campaign-hold-dropdown"
+                      className="w-full bg-[#071322]/96 border border-[#00e5ff] shadow-[0_8px_24px_rgba(0,0,0,0.85)] p-1.5 flex flex-col gap-1 z-50"
+                    >
+                      <div className="flex items-center justify-between px-1.5 py-0.5 text-[9px] font-mono text-[#7dd3fc] border-b border-[#1e3a5f]">
+                        <span>CAMPAIGN OPTIONS (ACTIVE)</span>
+                        <button
+                          type="button"
+                          onClick={() => setCampaignDropdownOpen(false)}
+                          className="text-[#f87171] hover:text-white font-bold cursor-pointer px-1"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          handleStartCampaignGame();
+                        }}
+                        className="w-full py-1.5 px-2.5 bg-[#0c243d] hover:bg-[#00e5ff] text-[#e0f2fe] hover:text-[#040810] font-mono font-bold text-[10px] uppercase text-left transition-colors cursor-pointer flex items-center justify-between"
+                      >
+                        <span>▶ NEW CAMPAIGN</span>
+                        <span className="text-[9px] opacity-80">RESTART</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          handleRegenerateCampaignMap();
+                        }}
+                        className="w-full py-1.5 px-2.5 bg-[#0c243d] hover:bg-[#00ff66] text-[#e0f2fe] hover:text-[#040810] font-mono font-bold text-[10px] uppercase text-left transition-colors cursor-pointer flex items-center justify-between"
+                      >
+                        <span>↻ REGENERATE MAP</span>
+                        <span className="text-[9px] opacity-80">SEED #{mapSeedDisplay}</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {phase === 'menu' && (
+                <>
+                  <button
+                    onClick={() => {
+                      setPhase('multiplayer_browser');
+                      if (window.SFX) window.SFX.playClick();
+                      if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+                        socketRef.current.send(JSON.stringify({ type: 'c:get_lobbies', clientKey: clientKeyRef.current }));
+                      }
+                    }}
+                    className="w-full py-2.5 px-3.5 bg-[#0d1c2e]/90 hover:bg-[#132840] text-[#00e5ff] font-extrabold text-xs tracking-widest uppercase border border-[#2b4c73] hover:border-[#00e5ff] transition-all cursor-pointer flex items-center justify-between"
+                  >
+                    <span>MULTIPLAYER</span>
+                    <span className="text-[10px] font-mono text-[#00ff66]">LOBBIES</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      if (window.SFX) {
+                        window.SFX.muted = !window.SFX.muted;
+                        window.SFX.playClick();
+                      }
+                      if (typeof (window as any).toggleHudSettingsModal === 'function') {
+                        (window as any).toggleHudSettingsModal();
+                      }
+                    }}
+                    className="w-full py-2 px-3.5 bg-[#091320]/90 hover:bg-[#0e1d30] text-[#93b4d4] font-bold text-[11px] tracking-wider uppercase border border-[#233852] transition-all cursor-pointer flex items-center justify-between"
+                  >
+                    <span>SETTINGS / AUDIO</span>
+                    <span className="font-mono text-[10px] text-[#00e5ff]">{window.SFX?.muted ? 'MUTED' : 'ACTIVE'}</span>
+                  </button>
+
+                  {/* Procedural Planet Biome Selector */}
+                  <div className="pt-2 mt-1 border-t border-[#1c314a]">
+                    <div className="flex items-center justify-between text-[9px] font-mono text-[#88a8c8] uppercase mb-1.5">
+                      <span>PLANET BIOME</span>
+                      <span className="text-[#00e5ff] font-bold">{planetBiome.toUpperCase()}</span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-1">
+                      {([
+                        { id: 'highland', label: 'HIGHLAND' },
+                        { id: 'desert', label: 'DESERT' },
+                        { id: 'ocean', label: 'OCEAN' },
+                        { id: 'lava', label: 'LAVA' },
+                        { id: 'jungle', label: 'JUNGLE' },
+                        { id: 'random', label: 'RANDOM' }
+                      ] as const).map(b => (
+                        <button
+                          key={b.id}
+                          type="button"
+                          onClick={() => handleSelectPlanetBiome(b.id)}
+                          className={`py-1 px-1.5 text-[9px] font-mono font-bold uppercase border transition-colors cursor-pointer ${
+                            planetBiome === b.id
+                              ? 'bg-[#00e5ff] text-[#040810] border-[#a5f3fc]'
+                              : 'bg-[#081321] text-[#8faecf] border-[#1f3754] hover:border-[#00e5ff]'
+                          }`}
+                        >
+                          {b.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </>
+              )}
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Campaign Back Button Pill when Campaign is Initializing or Active and Dropdown is Closed */}
+      {(phase === 'loading_match' || (phase === 'playing' && !isMultiplayerMatch)) && !campaignDropdownOpen && (
+        <div className="fixed top-11 left-3 z-40 pointer-events-auto flex items-center gap-1.5">
+          <button
+            data-testid="campaign-back-btn"
+            type="button"
+            onClick={handleBackFromCampaignToMenu}
+            className="px-2.5 py-1 bg-[#081322]/90 hover:bg-[#ff2a4b] text-[#93b4d4] hover:text-white border border-[#2b4c73] hover:border-[#ff2a4b] text-[10px] font-mono font-bold uppercase transition-colors cursor-pointer shadow-md"
+          >
+            &laquo; BACK
+          </button>
+          <button
+            type="button"
+            onClick={() => setCampaignDropdownOpen(true)}
+            className="px-2 py-1 bg-[#081322]/90 hover:bg-[#00e5ff] text-[#00e5ff] hover:text-[#040810] border border-[#2b4c73] text-[10px] font-mono font-bold uppercase transition-colors cursor-pointer shadow-md"
+            title="Open Campaign Options"
+          >
+            CAMPAIGN ▾
+          </button>
         </div>
       )}
 

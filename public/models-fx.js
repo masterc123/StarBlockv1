@@ -12002,7 +12002,13 @@ function spawnMindControlDominationFX(targetPos, emitterPos) {
     let initFailed = false;
     function ensureInitialized() {
         if (initFailed) return false;
+        if (typeof IS_MOBILE !== 'undefined' && IS_MOBILE) {
+            // On mobile (Adreno 610), #portrait-wing is hidden and creating a second WebGLRenderer can evict the primary WebGL context.
+            return false;
+        }
         if (portraitRenderer) return true;
+        const wing = document.getElementById('portrait-wing');
+        if (wing && wing.offsetParent === null) return false;
         const canvas = document.getElementById('portrait-3d-canvas');
         if (!canvas || typeof THREE === 'undefined') return false;
         try {

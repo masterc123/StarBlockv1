@@ -4,43 +4,95 @@
 window.APP_ERROR_HANDLER = {
     errors: [],
     dedupMap: new Map(),
-    maxLogs: 100,
+    maxLogs: 200,
     lastToastMs: 0,
     overlayEl: null,
-    record(context, err, category = 'runtime') {
-        const msg = err && err.message ? err.message : String(err);
-        const stack = err && err.stack ? String(err.stack).split('\n').slice(0, 3).join(' | ') : '';
-        const key = `${category}:${context}:${msg}`;
-        const nowMs = Date.now();
-        const prev = this.dedupMap.get(key);
-        if (prev && (nowMs - prev.lastSeenMs) < 5000) {
-            prev.count++;
-            prev.lastSeenMs = nowMs;
-            prev.time = new Date().toISOString().slice(11, 19);
-            this.renderDiagnosticOverlay();
-            return;
+    _recording: false,
+    _parseStackMeta(err) {
+        const rawStack = (err && err.stack) ? String(err.stack) : '';
+        const lines = rawStack.split('\n').map(s => s.trim()).filter(Boolean);
+        let file = 'public/game.js';
+        let line = 0;
+        let func = 'anonymous';
+        for (let i = 0; i < lines.length; i++) {
+            const l = lines[i];
+            if (l.includes('APP_ERROR_HANDLER')) continue;
+            const m = l.match(/(?:at\s+([^\s(]+)\s+\()?([^()\s]+\.(?:js|ts|tsx)):(\d+)(?::\d+)?\)?/i);
+            if (m) {
+                func = m[1] || 'global';
+                file = m[2].replace(/^https?:\/\/[^/]+\//, '');
+                line = parseInt(m[3], 10) || 0;
+                break;
+            }
         }
-        const entry = {
-            time: new Date().toISOString().slice(11, 19),
-            category,
-            context,
-            message: msg,
-            stack,
-            count: 1,
-            lastSeenMs: nowMs
+        return {
+            stack: lines.slice(0, 6).join(' | '),
+            file,
+            line,
+            func
         };
-        this.dedupMap.set(key, entry);
-        this.errors.push(entry);
-        if (this.errors.length > this.maxLogs) {
-            const removed = this.errors.shift();
-            if (removed) this.dedupMap.delete(`${removed.category}:${removed.context}:${removed.message}`);
+    },
+    record(context, err, category = 'runtime', severity = 'ERROR', affectedObject = null) {
+        if (this._recording) return;
+        this._recording = true;
+        try {
+            const msg = err && err.message ? err.message : String(err);
+            const meta = this._parseStackMeta(err);
+            const key = `${severity}:${category}:${context}:${msg}`;
+            const nowMs = Date.now();
+            const prev = this.dedupMap.get(key);
+            if (prev && (nowMs - prev.lastSeenMs) < 5000) {
+                prev.count++;
+                prev.lastSeenMs = nowMs;
+                prev.time = new Date().toISOString().slice(11, 19);
+                this.renderDiagnosticOverlay();
+                return;
+            }
+            const entry = {
+                id: `err_${nowMs}_${Math.floor(Math.random() * 1000)}`,
+                time: new Date().toISOString().slice(11, 19),
+                timestampMs: nowMs,
+                severity: String(severity || 'ERROR').toUpperCase(),
+                category: String(category || 'runtime').toLowerCase(),
+                context: String(context || 'unknown'),
+                message: msg,
+                stack: meta.stack,
+                file: meta.file,
+                line: meta.line,
+                func: meta.func,
+                affectedObject: affectedObject ? String(affectedObject) : null,
+                count: 1,
+                lastSeenMs: nowMs
+            };
+            this.dedupMap.set(key, entry);
+            this.errors.push(entry);
+            if (this.errors.length > this.maxLogs) {
+                const removed = this.errors.shift();
+                if (removed) this.dedupMap.delete(`${removed.severity}:${removed.category}:${removed.context}:${removed.message}`);
+            }
+            const now = performance.now();
+            if (now - this.lastToastMs > 2500) {
+                this.lastToastMs = now;
+                console.warn(`[RTS Error Guard - ${entry.severity}/${entry.category}/${entry.context}]:`, msg);
+            }
+            this.renderDiagnosticOverlay();
+        } catch (_) {
+            // Never throw inside error recorder
+        } finally {
+            this._recording = false;
         }
-        const now = performance.now();
-        if (now - this.lastToastMs > 2500) {
-            this.lastToastMs = now;
-            console.warn(`[RTS Error Guard - ${category}/${context}]:`, msg);
-        }
+    },
+    clear() {
+        this.errors.length = 0;
+        this.dedupMap.clear();
         this.renderDiagnosticOverlay();
+    },
+    triggerTestError() {
+        try {
+            throw new Error('Simulated diagnostic verification error (Trigger Test Error)');
+        } catch (testErr) {
+            this.record('AI_DEBUG.triggerTestError', testErr, 'diagnostic_test', 'WARNING', 'TestUnit#0');
+        }
     },
     toggleDiagnosticOverlay() {
         if (!this.overlayEl) {
@@ -57,13 +109,17 @@ window.APP_ERROR_HANDLER = {
     renderDiagnosticOverlay() {
         if (!this.overlayEl || this.overlayEl.style.display === 'none') return;
         const rows = this.errors.slice(-20).reverse().map(e =>
-            `<div style="border-bottom:1px solid #1e293b;padding:4px 0;"><span style="color:#38bdf8;">[${e.time}]</span> <strong style="color:#ffaa00;">[${e.category}/${e.context}]</strong> (x${e.count})<br/><span style="color:#f87171;">${e.message}</span></div>`
+            `<div style="border-bottom:1px solid #1e293b;padding:4px 0;"><span style="color:#38bdf8;">[${e.time}]</span> <strong style="color:#ffaa00;">[${e.severity}/${e.category}/${e.context}]</strong> (x${e.count})<br/><span style="color:#f87171;">${e.message}</span><br/><span style="color:#64748b;font-size:9px;">${e.file}:${e.line} (${e.func})</span></div>`
         ).join('');
         this.overlayEl.innerHTML = `<div style="display:flex;justify-content:space-between;border-bottom:1px solid #00e5ff;padding-bottom:4px;margin-bottom:6px;"><strong style="color:#00e5ff;">DIAGNOSTIC LOG [F9] (${this.errors.length}/${this.maxLogs})</strong><span style="color:#94a3b8;">SELF-HEALING ACTIVE</span></div>${rows || '<div style="color:#10b981;">0 Runtime Errors Recorded</div>'}`;
     }
 };
 window.addEventListener('error', (ev) => {
-    if (ev && ev.error) window.APP_ERROR_HANDLER.record('window.onerror', ev.error, 'runtime');
+    if (ev && ev.error) {
+        window.APP_ERROR_HANDLER.record('window.onerror', ev.error, 'runtime', 'ERROR');
+    } else if (ev && ev.message) {
+        window.APP_ERROR_HANDLER.record('window.onerror', new Error(ev.message), 'runtime', 'ERROR');
+    }
 });
 window.addEventListener('unhandledrejection', (ev) => {
     const reason = ev && ev.reason ? String(ev.reason.message || ev.reason) : '';
@@ -71,8 +127,134 @@ window.addEventListener('unhandledrejection', (ev) => {
         ev.preventDefault();
         return;
     }
-    window.APP_ERROR_HANDLER.record('unhandledrejection', ev.reason, 'network');
+    window.APP_ERROR_HANDLER.record('unhandledrejection', ev.reason || new Error('Unhandled Promise Rejection'), 'promise', 'ERROR');
 });
+
+// ============================================================================
+// 0B. SYSTEM INITIALIZATION & WORLD VALIDATION ENGINE
+// ============================================================================
+window.SYSTEM_INIT_VALIDATOR = {
+    stages: [],
+    lastRunTimestamp: null,
+    overallStatus: 'PASS',
+    recordStage(name, category, status, durationMs, details = '') {
+        const entry = {
+            name,
+            category,
+            status, // 'PASS' | 'WARNING' | 'FAIL'
+            durationMs: Number((durationMs || 0).toFixed(2)),
+            details,
+            timestamp: new Date().toISOString().slice(11, 19)
+        };
+        const idx = this.stages.findIndex(s => s.name === name);
+        if (idx >= 0) this.stages[idx] = entry;
+        else this.stages.push(entry);
+        this.recomputeOverall();
+        if (status === 'FAIL' && window.APP_ERROR_HANDLER) {
+            window.APP_ERROR_HANDLER.record(`InitValidator:${name}`, new Error(details || `${name} failed`), 'initialization', 'CRITICAL', category);
+        }
+        return entry;
+    },
+    recomputeOverall() {
+        if (this.stages.some(s => s.status === 'FAIL')) this.overallStatus = 'FAIL';
+        else if (this.stages.some(s => s.status === 'WARNING')) this.overallStatus = 'WARNING';
+        else this.overallStatus = 'PASS';
+    },
+    validateAllSystems() {
+        const tStart = performance.now();
+        this.lastRunTimestamp = new Date().toISOString();
+
+        // 1. World Validation
+        const tWorld = performance.now();
+        const hasTerrain = typeof getTerrainHeight === 'function' && typeof isWalkableGround === 'function';
+        const sampleH = hasTerrain ? getTerrainHeight(0, 0) : NaN;
+        const bridgesOk = Array.isArray(window.BRIDGES);
+        const resourcesOk = Array.isArray(window.GEM_CRATERS) && window.GEM_CRATERS.length > 0;
+        const worldOk = hasTerrain && Number.isFinite(sampleH) && bridgesOk && resourcesOk;
+        this.recordStage(
+            'World & Biome Geometry',
+            'World',
+            worldOk ? 'PASS' : 'FAIL',
+            performance.now() - tWorld,
+            `Biome=${window.ACTIVE_PLANET_BIOME || 'highland'}, Seed=${window.MAP_SEED || 100}, Bridges=${bridgesOk ? window.BRIDGES.length : 0}, GemCraters=${resourcesOk ? window.GEM_CRATERS.length : 0}`
+        );
+
+        // 2. Units & Factions Validation
+        const tUnits = performance.now();
+        const terranCount = Array.isArray(units) ? units.filter(u => u && u.hp > 0 && u.faction !== 'solaris').length : 0;
+        const solarisCount = Array.isArray(units) ? units.filter(u => u && u.hp > 0 && u.faction === 'solaris').length : 0;
+        const zergCount = Array.isArray(enemies) ? enemies.filter(e => e && e.hp > 0).length : 0;
+        let invalidUnitCoords = 0;
+        if (Array.isArray(enemies)) {
+            for (let i = 0; i < enemies.length; i++) {
+                const e = enemies[i];
+                if (e && e.mesh && (!Number.isFinite(e.mesh.position.x) || !Number.isFinite(e.mesh.position.z))) {
+                    invalidUnitCoords++;
+                }
+            }
+        }
+        this.recordStage(
+            'Units & Factions Registry',
+            'Units & Factions',
+            invalidUnitCoords === 0 ? 'PASS' : 'FAIL',
+            performance.now() - tUnits,
+            `Terran=${terranCount}, Solaris=${solarisCount}, Zerg=${zergCount}, InvalidCoords=${invalidUnitCoords}`
+        );
+
+        // 3. Buildings Validation
+        const tBld = performance.now();
+        const playerBldCount = Array.isArray(buildings) ? buildings.length : 0;
+        const zergBldCount = Array.isArray(enemyBuildings) ? enemyBuildings.length : 0;
+        const solarisBldCount = Array.isArray(solarisBuildings) ? solarisBuildings.length : 0;
+        const bldOk = zergBldCount > 0 || window.titleScreenActive;
+        this.recordStage(
+            'Faction Structures & Spawners',
+            'Buildings',
+            bldOk ? 'PASS' : 'WARNING',
+            performance.now() - tBld,
+            `PlayerBld=${playerBldCount}, ZergBld=${zergBldCount}, SolarisBld=${solarisBldCount}`
+        );
+
+        // 4. Functions & Dependencies Validation
+        const tFn = performance.now();
+        const requiredFns = [
+            ['spawnEnemyFromBuilding', typeof spawnEnemyFromBuilding === 'function'],
+            ['getGroundNavigationWaypoint', typeof getGroundNavigationWaypoint === 'function'],
+            ['computeSafeGroundStep', typeof computeSafeGroundStep === 'function'],
+            ['isWalkableGround', typeof isWalkableGround === 'function'],
+            ['createAnimatedUnitModel', typeof createAnimatedUnitModel === 'function'],
+            ['createEngineeredBuilding', typeof createEngineeredBuilding === 'function'],
+            ['TEXTURE_REGISTRY', !!(window.TEXTURE_REGISTRY && window.TEXTURE_REGISTRY.textures)]
+        ];
+        const missingFns = requiredFns.filter(pair => !pair[1]).map(pair => pair[0]);
+        this.recordStage(
+            'Core Functions & Dependencies',
+            'Functions & Dependencies',
+            missingFns.length === 0 ? 'PASS' : 'FAIL',
+            performance.now() - tFn,
+            missingFns.length === 0 ? `All ${requiredFns.length} core engine symbols verified` : `Missing: ${missingFns.join(', ')}`
+        );
+
+        // 5. Loading & Render Loop Validation
+        const tLoad = performance.now();
+        const hasRenderer = !!(typeof renderer !== 'undefined' && renderer && scene && camera);
+        const texSnap = window.TEXTURE_REGISTRY ? window.TEXTURE_REGISTRY.getDiagnosticSnapshot() : { totalRegistered: 0, missingOrInvalid: [] };
+        const loadOk = hasRenderer && texSnap.missingOrInvalid.length === 0;
+        this.recordStage(
+            'Loading & Render Pipeline',
+            'Loading',
+            loadOk ? 'PASS' : (hasRenderer ? 'WARNING' : 'FAIL'),
+            performance.now() - tLoad,
+            `Renderer=${hasRenderer ? 'ONLINE' : 'OFFLINE'}, Textures=${texSnap.totalRegistered} (${texSnap.missingOrInvalid.length} invalid)`
+        );
+
+        return {
+            overallStatus: this.overallStatus,
+            totalDurationMs: Number((performance.now() - tStart).toFixed(2)),
+            stages: this.stages.slice()
+        };
+    }
+};
 
 // ============================================================================
 // 7. STARCRAFT 1:1 COMMAND CONSOLE, CLICK-AND-DRAG BOX SELECTION & MINIMAP
@@ -389,6 +571,9 @@ function getCmdIconSvg(type) {
 function makeHealthPip(color, isStructure = false) {
     const root = document.createElement('div');
     root.className = 'hp-pip' + (isStructure ? ' structure' : '');
+    if (typeof hudVisibilityState !== 'undefined' && hudVisibilityState.showHpBars === false) {
+        root.style.display = 'none';
+    }
     const shieldBar = document.createElement('div');
     shieldBar.style.cssText = 'width:0%;height:3px;background:linear-gradient(90deg,#00e5ff,#38bdf8,#e0f2fe);box-shadow:0 0 5px #00e5ff;margin-bottom:1px;display:none;border-radius:1px;transition:width 0.08s linear;';
     const bar = document.createElement('div');
@@ -915,6 +1100,21 @@ function initEnemyHiveCluster() {
     ];
 
     initSolarisSynodEnclave();
+
+    // Ensure initial Zerg patrol vanguard spawns and registers into enemies[] when battlefield initializes
+    if (enemyBuildings.length > 0 && enemies.length === 0) {
+        const spawnerBld = enemyBuildings.find(eb => eb && eb.role === 'barracks') || enemyBuildings[0];
+        if (spawnerBld && spawnerBld.pos) {
+            try {
+                spawnEnemyFromBuilding('skitterer', spawnerBld.pos, spawnerBld);
+                spawnEnemyFromBuilding('spitter', spawnerBld.pos, spawnerBld);
+            } catch (spawnErr) {
+                if (window.APP_ERROR_HANDLER) {
+                    window.APP_ERROR_HANDLER.record('initEnemyHiveCluster:initialSpawn', spawnErr, 'zerg_ai', 'ERROR');
+                }
+            }
+        }
+    }
 }
 
 function constructNextEnemyZergStructure() {
@@ -5253,6 +5453,13 @@ const _projScreenVec = new THREE.Vector3();
 let _domProjCallCounter = 0;
 function projectToScreen(dom, pos, yOff = 1.3, forceImmediate = false) {
     if (!dom || !pos) return;
+    if (typeof hudVisibilityState !== 'undefined' && hudVisibilityState.showHpBars === false && dom.classList && dom.classList.contains('hp-pip')) {
+        if (dom._lastDisp !== 'none') {
+            dom._lastDisp = 'none';
+            dom.style.display = 'none';
+        }
+        return;
+    }
     const t0 = window.PERF_PROFILER ? performance.now() : 0;
 
     // Throttle DOM coordinate projection for unselected units on mobile/adaptive quality tiers
@@ -5292,6 +5499,7 @@ function projectToScreen(dom, pos, yOff = 1.3, forceImmediate = false) {
 let _activeCombatFloats = 0;
 let _lastCombatFloatMs = 0;
 function spawnCombatFloat(pos, txt, color = '#ffaa00') {
+    if (typeof hudVisibilityState !== 'undefined' && hudVisibilityState.showHpBars === false) return;
     const nowMs = performance.now();
     if (_activeCombatFloats >= 14 || (nowMs - _lastCombatFloatMs < 70 && _activeCombatFloats >= 6)) return;
     // Suppress non-numeric floating action/status text popups (e.g. Valkyrie mode switches, queued unit labels, orders)
@@ -5582,13 +5790,19 @@ function spawnEnemyFromBuilding(variant, originPos, sourceBuilding = null) {
     mesh.position.set(sx, isAir ? Math.max(0, groundH) + 5.8 : groundH, sz);
     const initYaw = Math.atan2(rallyX - sx, rallyZ - sz);
     mesh.rotation.y = initYaw;
+    window._zergUnitSeq = (window._zergUnitSeq || 0) + 1;
+    const assignedId = `zerg_${variant}_${window._zergUnitSeq}`;
+    mesh.userData.isZergUnitMesh = true;
+    mesh.userData.zergUnitId = assignedId;
+    mesh.userData.zergVariant = variant;
     scene.add(mesh);
 
     // Trigger visible bio-hatch pulse & organic mist on the producing Zerg structure
     if (sourceBuilding) {
         sourceBuilding.hatchPulse = 1.0;
     }
-    if (particles.length < maxParticlesBudget && window.isWorldPosInViewport && window.isWorldPosInViewport(sx, groundH, sz, 4.0)) {
+    const _spawnParticleLimit = (window.PERF_MANAGER && window.PERF_MANAGER.current && window.PERF_MANAGER.current.maxParticles) || 120;
+    if (particles.length < _spawnParticleLimit && window.isWorldPosInViewport && window.isWorldPosInViewport(sx, groundH, sz, 4.0)) {
         for (let pi = 0; pi < 5; pi++) {
             const spore = new THREE.Mesh(SHARED_FX_GEO.goreChunk, pi % 2 === 0 ? MAT.hiveVeinGlow : MAT.acidGlow);
             spore.scale.setScalar(0.32 + Math.random() * 0.22);
@@ -5613,9 +5827,6 @@ function spawnEnemyFromBuilding(variant, originPos, sourceBuilding = null) {
     const isFlanker = (variant === 'skitterer' || variant === 'burster') && Math.random() < 0.45;
     const flankSide = (enemies.length % 2 === 0 ? 1 : -1);
     const isMelee = baseStats.rng <= 2.5;
-
-    window._zergUnitSeq = (window._zergUnitSeq || 0) + 1;
-    const assignedId = `zerg_${variant}_${window._zergUnitSeq}`;
 
     const enemyObj = {
         id: assignedId,
@@ -6703,14 +6914,31 @@ window.SQUAD_MANAGER = {
 
 window.AI_DEBUG = {
     enabled: false,
+    paused: false,
+    activeTab: 'overview',
+    severityFilter: 'ALL',
+    categoryFilter: 'ALL',
     worldVizEnabled: true,
     loggingEnabled: true,
-    showGraphicsPanel: false,
+    showGraphicsPanel: true,
     selectedUnitId: null,
+    followUnitId: null,
     logHistory: [],
     lastSimTestResult: null,
     group: null,
     panelEl: null,
+    TABS: [
+        { id: 'overview', label: '1.Overview' },
+        { id: 'errors', label: '2.Errors' },
+        { id: 'graphics', label: '3.Graphics' },
+        { id: 'terrain', label: '4.Terrain' },
+        { id: 'factions', label: '5.Factions' },
+        { id: 'zerg', label: '6.Zerg AI' },
+        { id: 'world_init', label: '7.World Init' },
+        { id: 'loading', label: '8.Loading' },
+        { id: 'performance', label: '9.Perf' },
+        { id: 'inspector', label: '10.Inspector' }
+    ],
     _vizPool: {
         lines: [],
         markers: [],
@@ -6722,13 +6950,16 @@ window.AI_DEBUG = {
         markerGeo: null
     },
     logEvent(msg) {
-        if (!this.loggingEnabled) return;
+        if (!this.loggingEnabled || this.paused) return;
         const ts = (state && typeof state.elapsedSec === 'number') ? state.elapsedSec.toFixed(2) : '0.00';
         this.logHistory.push(`[${ts}s] ${msg}`);
-        if (this.logHistory.length > 80) this.logHistory.shift();
+        if (this.logHistory.length > 120) this.logHistory.shift();
     },
     clearHistory() {
         this.logHistory.length = 0;
+        if (window.APP_ERROR_HANDLER && typeof window.APP_ERROR_HANDLER.clear === 'function') {
+            window.APP_ERROR_HANDLER.clear();
+        }
         for (let i = 0; i < enemies.length; i++) {
             enemies[i].lastError = null;
             enemies[i].lastStuckPos = null;
@@ -6736,11 +6967,20 @@ window.AI_DEBUG = {
         if (typeof NAV_STUCK_HOTSPOTS !== 'undefined') {
             NAV_STUCK_HOTSPOTS.length = 0;
         }
-        this.logEvent('Diagnostic history & stuck hotspots cleared.');
+        this.logEvent('Diagnostic history, runtime errors & stuck hotspots cleared.');
         this.renderUI(true);
     },
     selectUnit(unitId) {
         this.selectedUnitId = unitId;
+        this.renderUI(true);
+    },
+    toggleFollowUnit(unitId) {
+        const targetId = unitId || this.selectedUnitId;
+        this.followUnitId = (this.followUnitId === targetId) ? null : targetId;
+        this.renderUI(true);
+    },
+    togglePause() {
+        this.paused = !this.paused;
         this.renderUI(true);
     },
     toggleWorldViz() {
@@ -6754,16 +6994,41 @@ window.AI_DEBUG = {
     },
     toggleGraphicsPanel() {
         this.showGraphicsPanel = !this.showGraphicsPanel;
+        this.activeTab = 'graphics';
         this.renderUI(true);
     },
-    exportReport() {
-        const fullReport = {
+    buildFullReportObject() {
+        const sysVal = window.SYSTEM_INIT_VALIDATOR ? window.SYSTEM_INIT_VALIDATOR.validateAllSystems() : null;
+        return {
             exportedAt: new Date().toISOString(),
+            overview: {
+                phase: window.titleScreenActive ? 'menu' : (window.loadingCameraSweep ? 'loading' : 'playing'),
+                biome: window.ACTIVE_PLANET_BIOME || 'highland',
+                mapSeed: window.MAP_SEED || 100,
+                basePlaced: !!(state && state.basePlaced),
+                wave: state ? state.wave : 1,
+                elapsedSec: state ? Number((state.elapsedSec || 0).toFixed(2)) : 0
+            },
+            runtimeErrors: window.APP_ERROR_HANDLER ? window.APP_ERROR_HANDLER.errors.slice() : [],
             aiDiagnostics: window.ZERG_AI_DIAGNOSTICS ? window.ZERG_AI_DIAGNOSTICS.getReport() : {},
             graphicsDiagnostics: window.GRAPHICS_DIAGNOSTICS ? window.GRAPHICS_DIAGNOSTICS.getSnapshot() : {},
+            textureRegistry: window.TEXTURE_REGISTRY ? window.TEXTURE_REGISTRY.getDiagnosticSnapshot() : {},
+            systemInitValidation: sysVal,
             lastSimTestResult: this.lastSimTestResult,
             logHistory: this.logHistory.slice()
         };
+    },
+    copyReport() {
+        const fullReport = this.buildFullReportObject();
+        const jsonStr = JSON.stringify(fullReport, null, 2);
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(jsonStr).catch(() => {});
+        }
+        this.logEvent('Copied full diagnostic JSON report to clipboard.');
+        this.renderUI(true);
+    },
+    exportReport() {
+        const fullReport = this.buildFullReportObject();
         const jsonStr = JSON.stringify(fullReport, null, 2);
         try {
             const blob = new Blob([jsonStr], { type: 'application/json' });
@@ -6809,13 +7074,13 @@ window.AI_DEBUG = {
             'position:fixed',
             'top:44px',
             'right:10px',
-            'width:min(430px, 95vw)',
-            'max-height:calc(100vh - 60px)',
+            'width:min(470px, 96vw)',
+            'max-height:calc(100vh - 56px)',
             'z-index:9998',
-            'background:rgba(5, 11, 20, 0.94)',
+            'background:rgba(5, 11, 20, 0.95)',
             'border:1px solid #00e5ff',
             'border-radius:8px',
-            'box-shadow:0 10px 32px rgba(0,0,0,0.8)',
+            'box-shadow:0 10px 32px rgba(0,0,0,0.85)',
             'color:#e2f1ff',
             'font:11px/1.38 monospace',
             'display:none',
@@ -6824,23 +7089,32 @@ window.AI_DEBUG = {
             'pointer-events:auto'
         ].join(';');
 
+        const tabButtonsHtml = this.TABS.map(t =>
+            `<button data-dbg-tab="${t.id}" class="dbg-tab-btn" style="background:#0f172a;color:#94a3b8;border:1px solid #1e293b;border-radius:3px;padding:3px 5px;cursor:pointer;font:10px monospace;">${t.label}</button>`
+        ).join('');
+
         panel.innerHTML = `
-            <div style="display:flex;align-items:center;justify-content:space-between;padding:7px 10px;background:rgba(0,229,255,0.14);border-bottom:1px solid rgba(0,229,255,0.35);">
-                <span style="font-weight:700;color:#00f0ff;letter-spacing:0.5px;">🐞 STARBLOCK LIVE AI &amp; ENGINE DEBUG [F8/F9]</span>
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 10px;background:rgba(0,229,255,0.14);border-bottom:1px solid rgba(0,229,255,0.35);">
+                <span style="font-weight:700;color:#00f0ff;letter-spacing:0.4px;">🐞 STARBLOCK 10-TAB ENGINE DEBUGGER [F8/F9]</span>
                 <button id="dbg-btn-close" style="background:#1e293b;color:#f87171;border:1px solid #f87171;border-radius:4px;padding:2px 7px;cursor:pointer;font:11px monospace;">✕</button>
             </div>
-            <div style="display:flex;flex-wrap:wrap;gap:4px;padding:6px 8px;background:rgba(15,23,42,0.9);border-bottom:1px solid rgba(148,163,184,0.2);">
-                <button id="dbg-btn-viz" style="flex:1 1 30%;background:#0f172a;color:#34d399;border:1px solid #34d399;border-radius:4px;padding:4px 6px;cursor:pointer;font:10px monospace;">3D VIZ: ON</button>
-                <button id="dbg-btn-log" style="flex:1 1 30%;background:#0f172a;color:#38bdf8;border:1px solid #38bdf8;border-radius:4px;padding:4px 6px;cursor:pointer;font:10px monospace;">LOG: ON</button>
-                <button id="dbg-btn-gfx" style="flex:1 1 30%;background:#0f172a;color:#c084fc;border:1px solid #c084fc;border-radius:4px;padding:4px 6px;cursor:pointer;font:10px monospace;">GFX DIAG</button>
-                <button id="dbg-btn-sim" style="flex:1 1 32%;background:#064e3b;color:#6ee7b7;border:1px solid #10b981;border-radius:4px;padding:4px 6px;cursor:pointer;font:10px monospace;font-weight:700;">▶ RUN ZERG SIM TEST</button>
-                <button id="dbg-btn-clear" style="flex:1 1 28%;background:#0f172a;color:#fbbf24;border:1px solid #fbbf24;border-radius:4px;padding:4px 6px;cursor:pointer;font:10px monospace;">CLEAR</button>
-                <button id="dbg-btn-export" style="flex:1 1 30%;background:#0f172a;color:#e2e8f0;border:1px solid #94a3b8;border-radius:4px;padding:4px 6px;cursor:pointer;font:10px monospace;">EXPORT JSON</button>
+            <div style="display:flex;flex-wrap:wrap;gap:3px;padding:5px 7px;background:rgba(15,23,42,0.92);border-bottom:1px solid rgba(148,163,184,0.2);">
+                <button id="dbg-btn-pause" style="background:#0f172a;color:#fde047;border:1px solid #eab308;border-radius:3px;padding:3px 6px;cursor:pointer;font:10px monospace;">PAUSE</button>
+                <button id="dbg-btn-viz" style="background:#0f172a;color:#34d399;border:1px solid #34d399;border-radius:3px;padding:3px 6px;cursor:pointer;font:10px monospace;">3D VIZ: ON</button>
+                <button id="dbg-btn-sim" style="background:#064e3b;color:#6ee7b7;border:1px solid #10b981;border-radius:3px;padding:3px 6px;cursor:pointer;font:10px monospace;font-weight:700;">▶ ZERG SIM</button>
+                <button id="dbg-btn-testerr" style="background:#3b0764;color:#e9d5ff;border:1px solid #a855f7;border-radius:3px;padding:3px 6px;cursor:pointer;font:10px monospace;">TEST ERR</button>
+                <button id="dbg-btn-follow" style="background:#0f172a;color:#38bdf8;border:1px solid #38bdf8;border-radius:3px;padding:3px 6px;cursor:pointer;font:10px monospace;">FOLLOW UNIT</button>
+                <button id="dbg-btn-clear" style="background:#0f172a;color:#fbbf24;border:1px solid #fbbf24;border-radius:3px;padding:3px 6px;cursor:pointer;font:10px monospace;">CLEAR</button>
+                <button id="dbg-btn-copy" style="background:#0f172a;color:#cbd5e1;border:1px solid #64748b;border-radius:3px;padding:3px 6px;cursor:pointer;font:10px monospace;">COPY</button>
+                <button id="dbg-btn-export" style="background:#0f172a;color:#e2e8f0;border:1px solid #94a3b8;border-radius:3px;padding:3px 6px;cursor:pointer;font:10px monospace;">EXPORT JSON</button>
             </div>
-            <div style="padding:6px 10px;font-size:10px;color:#94a3b8;background:rgba(2,6,14,0.7);border-bottom:1px solid rgba(148,163,184,0.16);">
-                Legend: <span style="color:#22c55e;">■ Green=Valid Path</span> · <span style="color:#ef4444;">■ Red=Blocked/Stuck</span> · <span style="color:#eab308;">● Yellow=Dest</span> · <span style="color:#3b82f6;">● Blue=Target</span>
+            <div id="dbg-tabs-bar" style="display:flex;flex-wrap:wrap;gap:3px;padding:5px 7px;background:rgba(2,6,14,0.9);border-bottom:1px solid rgba(0,229,255,0.2);">
+                ${tabButtonsHtml}
             </div>
-            <div id="dbg-panel-body" style="padding:8px 10px;overflow-y:auto;max-height:calc(100vh - 170px);display:flex;flex-direction:column;gap:8px;"></div>
+            <div style="padding:4px 8px;font-size:9.5px;color:#94a3b8;background:rgba(2,6,14,0.7);border-bottom:1px solid rgba(148,163,184,0.16);">
+                3D Legend: <span style="color:#22c55e;">■ Green=Valid Path</span> · <span style="color:#ef4444;">■ Red=Blocked/Stuck</span> · <span style="color:#eab308;">● Yellow=Dest</span> · <span style="color:#3b82f6;">● Blue=Target</span>
+            </div>
+            <div id="dbg-panel-body" style="padding:8px 10px;overflow-y:auto;max-height:calc(100vh - 210px);display:flex;flex-direction:column;gap:7px;"></div>
         `;
         panel.addEventListener('pointerdown', ev => ev.stopPropagation());
         panel.addEventListener('pointerup', ev => ev.stopPropagation());
@@ -6849,16 +7123,50 @@ window.AI_DEBUG = {
         this.panelEl = panel;
 
         document.getElementById('dbg-btn-close').onclick = () => this.toggle();
+        document.getElementById('dbg-btn-pause').onclick = () => this.togglePause();
         document.getElementById('dbg-btn-viz').onclick = () => this.toggleWorldViz();
-        document.getElementById('dbg-btn-log').onclick = () => this.toggleLogging();
-        document.getElementById('dbg-btn-gfx').onclick = () => this.toggleGraphicsPanel();
         document.getElementById('dbg-btn-clear').onclick = () => this.clearHistory();
+        document.getElementById('dbg-btn-copy').onclick = () => this.copyReport();
         document.getElementById('dbg-btn-export').onclick = () => this.exportReport();
+        document.getElementById('dbg-btn-follow').onclick = () => this.toggleFollowUnit();
+        document.getElementById('dbg-btn-testerr').onclick = () => {
+            if (window.APP_ERROR_HANDLER && typeof window.APP_ERROR_HANDLER.triggerTestError === 'function') {
+                window.APP_ERROR_HANDLER.triggerTestError();
+            }
+            this.activeTab = 'errors';
+            this.renderUI(true);
+        };
         document.getElementById('dbg-btn-sim').onclick = () => {
             if (typeof window.runZergMovementSimulationTest === 'function') {
                 window.runZergMovementSimulationTest();
             }
         };
+
+        const tabBtns = panel.querySelectorAll('.dbg-tab-btn');
+        tabBtns.forEach(btn => {
+            btn.onclick = () => {
+                this.activeTab = btn.getAttribute('data-dbg-tab') || 'overview';
+                this.renderUI(true);
+            };
+        });
+    },
+    _reconcileSceneZergMeshes() {
+        if (!scene) return { sceneZergMeshCount: 0, orphanedCount: 0 };
+        const trackedMeshes = new Set();
+        for (let i = 0; i < enemies.length; i++) {
+            if (enemies[i] && enemies[i].mesh) trackedMeshes.add(enemies[i].mesh);
+        }
+        let sceneZergMeshCount = 0;
+        let orphanedCount = 0;
+        scene.children.forEach(obj => {
+            if (obj && obj.userData && obj.userData.isZergUnitMesh) {
+                sceneZergMeshCount++;
+                if (!trackedMeshes.has(obj)) {
+                    orphanedCount++;
+                }
+            }
+        });
+        return { sceneZergMeshCount, orphanedCount };
     },
     _updateWorldViz() {
         if (!this.enabled || !this.worldVizEnabled || typeof THREE === 'undefined' || !scene) {
@@ -6924,7 +7232,6 @@ window.AI_DEBUG = {
             const isSelected = (this.selectedUnitId && e.id === this.selectedUnitId);
             const isBlocked = !e.navSuccess || (e.stuckTimer || 0) > 0.25 || e.lastNavResult === 'blocked';
 
-            // 1. Path line to navWaypoint and destination (Green = valid, Red = blocked)
             const wp = e.navWaypoint || e.currentDestination;
             if (wp && Number.isFinite(wp.x) && Number.isFinite(wp.z)) {
                 const wy = surfFn(wp.x, wp.z) + 0.55;
@@ -6935,13 +7242,11 @@ window.AI_DEBUG = {
                 }
             }
 
-            // 2. Yellow marker: current destination
             if (e.currentDestination && Number.isFinite(e.currentDestination.x) && Number.isFinite(e.currentDestination.z)) {
                 const dy = surfFn(e.currentDestination.x, e.currentDestination.z) + 0.75;
                 addDebugMarker(e.currentDestination.x, dy, e.currentDestination.z, pool.matDestMarker, isSelected ? 1.45 : 0.85);
             }
 
-            // 3. Blue marker: selected target
             if (e.lockedTarget) {
                 const lt = e.lockedTarget;
                 const ltPos = lt.mesh ? lt.mesh.position : lt.pos;
@@ -6951,7 +7256,6 @@ window.AI_DEBUG = {
                 }
             }
 
-            // 4. Red marker: stuck location
             if (e.lastStuckPos && Number.isFinite(e.lastStuckPos.x) && Number.isFinite(e.lastStuckPos.z)) {
                 const sy = surfFn(e.lastStuckPos.x, e.lastStuckPos.z) + 0.95;
                 addDebugMarker(e.lastStuckPos.x, sy, e.lastStuckPos.z, pool.matStuckMarker, 1.15);
@@ -6964,6 +7268,7 @@ window.AI_DEBUG = {
     _lastUiRenderMs: 0,
     renderUI(force = false) {
         if (!this.enabled) return;
+        if (this.paused && !force) return;
         const nowMs = performance.now();
         if (!force && nowMs - this._lastUiRenderMs < 240) return;
         this._lastUiRenderMs = nowMs;
@@ -6972,12 +7277,20 @@ window.AI_DEBUG = {
         const body = document.getElementById('dbg-panel-body');
         if (!body) return;
 
+        const btnPause = document.getElementById('dbg-btn-pause');
+        if (btnPause) btnPause.innerText = this.paused ? 'RESUME' : 'PAUSE';
         const btnViz = document.getElementById('dbg-btn-viz');
         if (btnViz) btnViz.innerText = `3D VIZ: ${this.worldVizEnabled ? 'ON' : 'OFF'}`;
-        const btnLog = document.getElementById('dbg-btn-log');
-        if (btnLog) btnLog.innerText = `LOG: ${this.loggingEnabled ? 'ON' : 'OFF'}`;
-        const btnGfx = document.getElementById('dbg-btn-gfx');
-        if (btnGfx) btnGfx.style.background = this.showGraphicsPanel ? '#3b0764' : '#0f172a';
+        const btnFollow = document.getElementById('dbg-btn-follow');
+        if (btnFollow) btnFollow.innerText = this.followUnitId ? `FOLLOW: ${this.followUnitId}` : 'FOLLOW UNIT';
+
+        const tabBtns = this.panelEl.querySelectorAll('.dbg-tab-btn');
+        tabBtns.forEach(btn => {
+            const isAct = btn.getAttribute('data-dbg-tab') === this.activeTab;
+            btn.style.background = isAct ? '#00e5ff' : '#0f172a';
+            btn.style.color = isAct ? '#040810' : '#94a3b8';
+            btn.style.fontWeight = isAct ? '700' : '400';
+        });
 
         const aiRep = window.ZERG_AI_DIAGNOSTICS ? window.ZERG_AI_DIAGNOSTICS.getReport() : {
             totalZergUnits: enemies.length,
@@ -6988,29 +7301,15 @@ window.AI_DEBUG = {
             recoveringCount: 0,
             units: []
         };
-
         if (!this.selectedUnitId && aiRep.units.length > 0) {
             this.selectedUnitId = aiRep.units[0].unitId;
         }
-        let selUnit = aiRep.units.find(u => u.unitId === this.selectedUnitId) || aiRep.units[0] || null;
-
-        let gfxHtml = '';
-        if (this.showGraphicsPanel && window.GRAPHICS_DIAGNOSTICS) {
-            const g = window.GRAPHICS_DIAGNOSTICS.getSnapshot();
-            const ctxCol = g.contextStatus === 'ACTIVE' ? '#22c55e' : (g.contextStatus === 'RESTORED' ? '#38bdf8' : '#ef4444');
-            const injErrs = g.shaderValidation.failedInjections.length;
-            const compErrs = g.shaderValidation.compilationErrors.length;
-            gfxHtml = `
-                <div style="background:rgba(30,18,52,0.75);border:1px solid #a855f7;border-radius:6px;padding:7px 9px;">
-                    <div style="font-weight:700;color:#d8b4fe;margin-bottom:4px;">GRAPHICS &amp; WEBGL DIAGNOSTICS</div>
-                    <div>Context Status: <b style="color:${ctxCol};">${g.contextStatus}</b> (Losses: ${g.contextLossCount}, Restores: ${g.contextRestoreCount})</div>
-                    <div>GPU Renderer: <span style="color:#cbd5e1;">${g.rendererInfo.renderer}</span></div>
-                    <div>FPS / Frame: <b>${g.fps} FPS</b> (${g.frameTimeMs} ms) | Quality: <b>${g.qualityTier}</b> | DPR: <b>${g.devicePixelRatio}</b></div>
-                    <div>Draw Calls: <b>${g.drawCalls}</b> | Tris: <b>${g.triangles}</b> | Geoms: <b>${g.geometries}</b> | Tex: <b>${g.textures}</b></div>
-                    <div>Shader Validated: <b>${g.shaderValidation.validatedCount}</b> | Failed Injections: <b style="color:${injErrs ? '#ef4444' : '#22c55e'};">${injErrs}</b> | Fallbacks: <b>${g.shaderValidation.fallbackMaterialsUsed}</b> | Compile Errors: <b style="color:${compErrs ? '#ef4444' : '#22c55e'};">${compErrs}</b></div>
-                </div>
-            `;
-        }
+        const selUnit = aiRep.units.find(u => u.unitId === this.selectedUnitId) || aiRep.units[0] || null;
+        const gSnap = window.GRAPHICS_DIAGNOSTICS ? window.GRAPHICS_DIAGNOSTICS.getSnapshot() : null;
+        const texSnap = window.TEXTURE_REGISTRY ? window.TEXTURE_REGISTRY.getDiagnosticSnapshot() : { totalRegistered: 0, missingOrInvalid: [], entries: [] };
+        const errList = window.APP_ERROR_HANDLER ? window.APP_ERROR_HANDLER.errors : [];
+        const sysVal = window.SYSTEM_INIT_VALIDATOR ? window.SYSTEM_INIT_VALIDATOR.validateAllSystems() : { overallStatus: 'PASS', stages: [] };
+        const sceneCheck = this._reconcileSceneZergMeshes();
 
         let simHtml = '';
         if (this.lastSimTestResult) {
@@ -7024,61 +7323,223 @@ window.AI_DEBUG = {
             `;
         }
 
-        const unitRows = aiRep.units.map(u => {
-            const isSel = selUnit && selUnit.unitId === u.unitId;
-            const stCol = u.aiState === 'ATTACKING' ? '#f87171' : (u.isStuck ? '#fbbf24' : '#34d399');
-            return `<div data-uid="${u.unitId}" class="dbg-unit-row" style="display:flex;justify-content:space-between;padding:3px 6px;border-radius:4px;cursor:pointer;background:${isSel ? 'rgba(0,229,255,0.22)' : 'rgba(15,23,42,0.65)'};border:1px solid ${isSel ? '#00e5ff' : 'transparent'};">
-                <span><b>${u.unitId}</b> (${u.unitType})</span>
-                <span style="color:${stCol};">${u.aiState} · ${u.actualSpeedPerSec}m/s</span>
-            </div>`;
-        }).join('');
-
-        const inspectorHtml = selUnit ? `
-            <div style="background:rgba(15,23,42,0.85);border:1px solid rgba(56,189,248,0.4);border-radius:6px;padding:7px 9px;">
-                <div style="font-weight:700;color:#38bdf8;margin-bottom:4px;">UNIT INSPECTOR: ${selUnit.unitId} (${selUnit.unitType.toUpperCase()})</div>
-                <div>AI State: <b>${selUnit.aiState}</b> | Position: <b>(${selUnit.position.x}, ${selUnit.position.z})</b></div>
-                <div>Target: <b>${selUnit.currentTarget}</b> @ <b>${selUnit.targetCoords ? `(${selUnit.targetCoords.x}, ${selUnit.targetCoords.z})` : 'N/A'}</b> (${selUnit.targetDistance ?? '-'}m)</div>
-                <div>Destination: <b>${selUnit.destination ? `(${selUnit.destination.x}, ${selUnit.destination.z})` : 'N/A'}</b> (Dist: ${selUnit.distanceToDestination ?? '-'}m)</div>
-                <div>Nav Waypoint: <b>${selUnit.navigationWaypoint ? `(${selUnit.navigationWaypoint.x}, ${selUnit.navigationWaypoint.z})` : 'N/A'}</b> | Nav Status: <b style="color:${selUnit.navigationSuccess ? '#22c55e' : '#ef4444'};">${selUnit.navigationSuccess ? 'SUCCESS' : 'FAILED'} (${selUnit.navigationResult})</b></div>
-                <div>Config Speed: <b>${selUnit.movementSpeed}m/s</b> | Actual Displacement/s: <b>${selUnit.actualSpeedPerSec}m/s</b></div>
-                <div>Stop Reason: <b>${selUnit.stopReason}</b> | Walkable Ground: <b style="color:${selUnit.terrainWalkable ? '#22c55e' : '#ef4444'};">${selUnit.terrainWalkable ? 'YES' : 'NO'}</b></div>
-                <div>Bridge Assigned: <b>${selUnit.bridgeAssignment}</b> | Recovery Attempts: <b>${selUnit.lastRecoveryAttempt}</b></div>
-                <div>Last Move: <b>${selUnit.lastSuccessfulMovementTime}s</b> | Last Attack: <b>${selUnit.lastSuccessfulAttackTime}s</b></div>
-                <div>Last JS Error: <span style="color:${selUnit.currentError ? '#f87171' : '#94a3b8'};">${selUnit.currentError || 'None'}</span></div>
-            </div>
-        ` : `<div style="color:#94a3b8;padding:6px;">No active Zerg units on battlefield. Click "▶ RUN ZERG SIM TEST" to spawn and verify units.</div>`;
-
-        const logsHtml = this.logHistory.length > 0
-            ? `<div style="background:rgba(2,6,14,0.85);border:1px solid rgba(148,163,184,0.2);border-radius:4px;padding:5px 7px;max-height:85px;overflow-y:auto;font-size:10px;color:#94a3b8;">${this.logHistory.slice(-12).reverse().join('<br>')}</div>`
-            : '';
-
-        body.innerHTML = `
-            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:4px;background:rgba(15,23,42,0.85);padding:6px 8px;border-radius:6px;border:1px solid rgba(0,229,255,0.25);">
-                <div>Total Zerg: <b style="color:#fff;">${aiRep.totalZergUnits}</b></div>
-                <div>Moving: <b style="color:#34d399;">${aiRep.movingCount}</b></div>
-                <div>Attacking: <b style="color:#f87171;">${aiRep.attackingCount}</b></div>
-                <div>Searching: <b style="color:#38bdf8;">${aiRep.searchingCount}</b></div>
-                <div>Stuck: <b style="color:#fbbf24;">${aiRep.stuckCount}</b></div>
-                <div>Recovering: <b style="color:#c084fc;">${aiRep.recoveringCount}</b></div>
-            </div>
-            ${simHtml}
-            ${gfxHtml}
-            <div style="display:flex;flex-direction:column;gap:3px;max-height:115px;overflow-y:auto;padding-right:2px;">
-                <div style="font-size:10px;color:#94a3b8;font-weight:700;">SELECT ZERG UNIT (CLICK ROW OR TAP IN 3D WORLD):</div>
-                ${unitRows || '<div style="color:#64748b;font-size:10px;">0 living Zerg units</div>'}
-            </div>
-            ${inspectorHtml}
-            ${logsHtml}
-        `;
-
-        const rows = body.querySelectorAll('.dbg-unit-row');
-        rows.forEach(r => {
-            r.onclick = () => {
-                this.selectUnit(r.getAttribute('data-uid'));
-            };
-        });
+        const tab = this.activeTab;
+        if (tab === 'overview') {
+            body.innerHTML = `
+                <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:4px;background:rgba(15,23,42,0.85);padding:6px 8px;border-radius:6px;border:1px solid rgba(0,229,255,0.25);">
+                    <div>Total Zerg: <b style="color:#fff;">${aiRep.totalZergUnits}</b></div>
+                    <div>Moving: <b style="color:#34d399;">${aiRep.movingCount}</b></div>
+                    <div>Attacking: <b style="color:#f87171;">${aiRep.attackingCount}</b></div>
+                    <div>Runtime Errs: <b style="color:${errList.length ? '#f87171' : '#34d399'};">${errList.length}</b></div>
+                    <div>FPS: <b style="color:#38bdf8;">${gSnap ? gSnap.fps : 60}</b></div>
+                    <div>Init Status: <b style="color:${sysVal.overallStatus === 'PASS' ? '#34d399' : '#f87171'};">${sysVal.overallStatus}</b></div>
+                </div>
+                ${simHtml}
+                <div style="background:rgba(15,23,42,0.75);border:1px solid rgba(148,163,184,0.25);border-radius:6px;padding:6px 8px;">
+                    <div style="font-weight:700;color:#38bdf8;margin-bottom:3px;">SCENE VS ARRAY RECONCILIATION</div>
+                    <div>Zerg in enemies[]: <b>${enemies.length}</b> | Zerg Meshes in Scene: <b>${sceneCheck.sceneZergMeshCount}</b> | Orphaned: <b style="color:${sceneCheck.orphanedCount ? '#ef4444' : '#22c55e'};">${sceneCheck.orphanedCount}</b></div>
+                    <div>Terran/Solaris Units: <b>${units.length}</b> | Player Blds: <b>${buildings.length}</b> | Zerg Blds: <b>${enemyBuildings.length}</b></div>
+                </div>
+                <div style="background:rgba(2,6,14,0.85);border:1px solid rgba(148,163,184,0.2);border-radius:4px;padding:5px 7px;max-height:110px;overflow-y:auto;font-size:10px;color:#94a3b8;">
+                    <div style="color:#00e5ff;font-weight:700;margin-bottom:2px;">LIVE EVENT STREAM:</div>
+                    ${this.logHistory.slice(-14).reverse().join('<br>') || 'No events logged yet.'}
+                </div>
+            `;
+        } else if (tab === 'errors') {
+            const filtered = errList.filter(e => {
+                if (this.severityFilter !== 'ALL' && e.severity !== this.severityFilter) return false;
+                if (this.categoryFilter !== 'ALL' && e.category !== this.categoryFilter) return false;
+                return true;
+            });
+            const errRows = filtered.slice(-30).reverse().map(e => `
+                <div style="border-bottom:1px solid #1e293b;padding:4px 0;">
+                    <span style="color:#38bdf8;">[${e.time}]</span>
+                    <b style="color:${e.severity === 'CRITICAL' || e.severity === 'ERROR' ? '#ef4444' : '#fbbf24'};">[${e.severity}/${e.category}]</b>
+                    <span style="color:#cbd5e1;">${e.context}</span> (x${e.count})
+                    ${e.affectedObject ? `<span style="color:#c084fc;">[${e.affectedObject}]</span>` : ''}<br/>
+                    <span style="color:#f87171;">${e.message}</span><br/>
+                    <span style="color:#64748b;font-size:9.5px;">${e.file}:${e.line} @ ${e.func} | ${e.stack}</span>
+                </div>
+            `).join('');
+            body.innerHTML = `
+                <div style="display:flex;gap:4px;align-items:center;font-size:10px;">
+                    <span>Severity:</span>
+                    <select id="dbg-sel-sev" style="background:#0f172a;color:#e2e8f0;border:1px solid #334155;font:10px monospace;">
+                        ${['ALL', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'].map(s => `<option value="${s}" ${this.severityFilter === s ? 'selected' : ''}>${s}</option>`).join('')}
+                    </select>
+                    <span>Category:</span>
+                    <select id="dbg-sel-cat" style="background:#0f172a;color:#e2e8f0;border:1px solid #334155;font:10px monospace;">
+                        ${['ALL', 'runtime', 'promise', 'zerg_ai', 'initialization', 'diagnostic_test'].map(c => `<option value="${c}" ${this.categoryFilter === c ? 'selected' : ''}>${c}</option>`).join('')}
+                    </select>
+                </div>
+                <div style="background:rgba(2,6,14,0.9);border:1px solid #334155;border-radius:6px;padding:6px 8px;max-height:240px;overflow-y:auto;">
+                    ${errRows || '<div style="color:#22c55e;">0 Runtime Errors Recorded ✓</div>'}
+                </div>
+            `;
+            const selSev = document.getElementById('dbg-sel-sev');
+            if (selSev) selSev.onchange = () => { this.severityFilter = selSev.value; this.renderUI(true); };
+            const selCat = document.getElementById('dbg-sel-cat');
+            if (selCat) selCat.onchange = () => { this.categoryFilter = selCat.value; this.renderUI(true); };
+        } else if (tab === 'graphics') {
+            const g = gSnap || { contextStatus: 'ACTIVE', contextLossCount: 0, contextRestoreCount: 0, rendererInfo: { renderer: 'WebGL' }, fps: 60, frameTimeMs: 16.6, qualityTier: 'high', devicePixelRatio: 1, drawCalls: 0, triangles: 0, geometries: 0, textures: 0, shaderValidation: { validatedCount: 0, failedInjections: [], fallbackMaterialsUsed: 0, compilationErrors: [] } };
+            body.innerHTML = `
+                <div style="background:rgba(30,18,52,0.75);border:1px solid #a855f7;border-radius:6px;padding:7px 9px;">
+                    <div style="font-weight:700;color:#d8b4fe;margin-bottom:4px;">WEBGL &amp; SHADER DIAGNOSTICS</div>
+                    <div>Context Status: <b style="color:#22c55e;">${g.contextStatus}</b> (Losses: ${g.contextLossCount}, Restores: ${g.contextRestoreCount})</div>
+                    <div>GPU: <span style="color:#cbd5e1;">${g.rendererInfo.renderer}</span></div>
+                    <div>Shadows Synced: <b style="color:#22c55e;">${renderer && renderer.shadowMap ? (renderer.shadowMap.enabled ? 'ENABLED' : 'DISABLED (MOBILE SAFE)') : 'N/A'}</b></div>
+                    <div>Draw Calls: <b>${g.drawCalls}</b> | Tris: <b>${g.triangles}</b> | Geoms: <b>${g.geometries}</b> | GPU Tex: <b>${g.textures}</b></div>
+                    <div>Shader Validated: <b>${g.shaderValidation.validatedCount}</b> | Failed Injections: <b>${g.shaderValidation.failedInjections.length}</b> | Compile Errs: <b>${g.shaderValidation.compilationErrors.length}</b></div>
+                </div>
+                <div style="background:rgba(15,23,42,0.85);border:1px solid #38bdf8;border-radius:6px;padding:7px 9px;">
+                    <div style="font-weight:700;color:#38bdf8;margin-bottom:4px;">CENTRALIZED TEXTURE REGISTRY (${texSnap.totalRegistered} Textures)</div>
+                    <div>Missing / Invalid Textures: <b style="color:${texSnap.missingOrInvalid.length ? '#ef4444' : '#22c55e'};">${texSnap.missingOrInvalid.length}</b></div>
+                    <div style="max-height:110px;overflow-y:auto;margin-top:4px;font-size:9.5px;color:#cbd5e1;">
+                        ${texSnap.entries.map(t => `<div>• <b>${t.name}</b>: ${t.hasData ? '<span style="color:#22c55e;">READY</span>' : '<span style="color:#ef4444;">MISSING</span>'} (${t.width}x${t.height})</div>`).join('')}
+                    </div>
+                </div>
+            `;
+        } else if (tab === 'terrain') {
+            const bridgeCount = Array.isArray(window.BRIDGES) ? window.BRIDGES.length : 0;
+            const gemCount = Array.isArray(window.GEM_CRATERS) ? window.GEM_CRATERS.length : 0;
+            const hotspotCount = typeof NAV_STUCK_HOTSPOTS !== 'undefined' ? NAV_STUCK_HOTSPOTS.length : 0;
+            body.innerHTML = `
+                <div style="background:rgba(15,23,42,0.85);border:1px solid #34d399;border-radius:6px;padding:7px 9px;">
+                    <div style="font-weight:700;color:#34d399;margin-bottom:4px;">TERRAIN, BIOME &amp; NAVIGATION GRID</div>
+                    <div>Active Biome: <b>${(window.ACTIVE_PLANET_BIOME || 'highland').toUpperCase()}</b> | Seed: <b>#${window.MAP_SEED || 100}</b></div>
+                    <div>Archetype: <b>${window.MAP_ARCHETYPE || 'canyon'}</b> | Ramp Sanctuary: <b>${window.HAS_BASE_PLATEAU_RAMP ? 'YES' : 'NO'}</b></div>
+                    <div>Bridges: <b>${bridgeCount}</b> | Gem Craters: <b>${gemCount}</b> | Dynamic Stuck Hotspots: <b>${hotspotCount}</b></div>
+                    <div>Terrain Mat Shadows: <b>${typeof terrainMat !== 'undefined' && terrainMat ? 'SYNCED' : 'N/A'}</b></div>
+                </div>
+            `;
+        } else if (tab === 'factions') {
+            const tUnits = units.filter(u => u && u.hp > 0 && u.faction !== 'solaris').length;
+            const sUnits = units.filter(u => u && u.hp > 0 && u.faction === 'solaris').length;
+            const zUnits = enemies.filter(e => e && e.hp > 0).length;
+            body.innerHTML = `
+                <div style="background:rgba(15,23,42,0.85);border:1px solid #38bdf8;border-radius:6px;padding:7px 9px;">
+                    <div style="font-weight:700;color:#38bdf8;margin-bottom:4px;">3-FACTION FORCE &amp; ECONOMY SUMMARY</div>
+                    <div><b>Terran Dominion</b>: ${tUnits} Units | ${buildings.length} Structures | Minerals: ${Math.floor(state.req || 0)} | Gems: ${Math.floor(state.gems || 0)}</div>
+                    <div><b>Solaris Protoss</b>: ${sUnits} Units | ${solarisBuildings.length} Enclave Structures | Mode: ${(state.aiAllyMode || 'defensive').toUpperCase()}</div>
+                    <div><b>Zerg Swarm</b>: ${zUnits} Units | ${enemyBuildings.length} Hive Structures | Wave: ${state.wave || 1}</div>
+                </div>
+            `;
+        } else if (tab === 'zerg') {
+            const unitRows = aiRep.units.map(u => {
+                const isSel = selUnit && selUnit.unitId === u.unitId;
+                const stCol = u.aiState === 'ATTACKING' ? '#f87171' : (u.isStuck ? '#fbbf24' : '#34d399');
+                return `<div data-uid="${u.unitId}" class="dbg-unit-row" style="display:flex;justify-content:space-between;padding:3px 6px;border-radius:4px;cursor:pointer;background:${isSel ? 'rgba(0,229,255,0.22)' : 'rgba(15,23,42,0.65)'};border:1px solid ${isSel ? '#00e5ff' : 'transparent'};">
+                    <span><b>${u.unitId}</b> (${u.unitType})</span>
+                    <span style="color:${stCol};">${u.aiState} · ${u.actualSpeedPerSec}m/s</span>
+                </div>`;
+            }).join('');
+            const bldRows = enemyBuildings.map((eb, idx) =>
+                `<div>#${idx + 1} <b>${eb.role}</b> HP:${Math.round(eb.hp)}/${eb.maxHp} | Build:${Math.round((eb.buildProgress ?? 1) * 100)}% | SpawnTimer:${eb.spawnTimer !== undefined ? eb.spawnTimer.toFixed(1) + 's' : 'N/A'}</div>`
+            ).join('');
+            body.innerHTML = `
+                <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:4px;background:rgba(15,23,42,0.85);padding:6px 8px;border-radius:6px;border:1px solid rgba(0,229,255,0.25);">
+                    <div>Total Zerg: <b style="color:#fff;">${aiRep.totalZergUnits}</b></div>
+                    <div>Moving: <b style="color:#34d399;">${aiRep.movingCount}</b></div>
+                    <div>Attacking: <b style="color:#f87171;">${aiRep.attackingCount}</b></div>
+                    <div>Searching: <b style="color:#38bdf8;">${aiRep.searchingCount}</b></div>
+                    <div>Stuck: <b style="color:#fbbf24;">${aiRep.stuckCount}</b></div>
+                    <div>Recovering: <b style="color:#c084fc;">${aiRep.recoveringCount}</b></div>
+                </div>
+                ${simHtml}
+                <div style="background:rgba(15,23,42,0.8);border:1px solid rgba(184,69,255,0.4);border-radius:6px;padding:6px 8px;font-size:10px;">
+                    <div style="font-weight:700;color:#d8b4fe;margin-bottom:3px;">ZERG HIVE SPAWNER TIMERS (${enemyBuildings.length} Structures)</div>
+                    ${bldRows || 'No Zerg structures active.'}
+                </div>
+                <div style="display:flex;flex-direction:column;gap:3px;max-height:130px;overflow-y:auto;">
+                    <div style="font-size:10px;color:#94a3b8;font-weight:700;">CLICK ZERG UNIT TO INSPECT IN TAB 10:</div>
+                    ${unitRows || '<div style="color:#64748b;font-size:10px;">0 living Zerg units</div>'}
+                </div>
+            `;
+            body.querySelectorAll('.dbg-unit-row').forEach(r => {
+                r.onclick = () => {
+                    this.selectUnit(r.getAttribute('data-uid'));
+                    this.activeTab = 'inspector';
+                    this.renderUI(true);
+                };
+            });
+        } else if (tab === 'world_init') {
+            const stageRows = sysVal.stages.map(s => {
+                const col = s.status === 'PASS' ? '#22c55e' : (s.status === 'WARNING' ? '#fbbf24' : '#ef4444');
+                return `<div style="border-bottom:1px solid #1e293b;padding:4px 0;">
+                    <div style="display:flex;justify-content:space-between;">
+                        <b>[${s.category}] ${s.name}</b>
+                        <span style="color:${col};font-weight:700;">${s.status} (${s.durationMs}ms)</span>
+                    </div>
+                    <div style="color:#94a3b8;font-size:10px;">${s.details}</div>
+                </div>`;
+            }).join('');
+            body.innerHTML = `
+                <div style="background:rgba(15,23,42,0.85);border:1px solid #00e5ff;border-radius:6px;padding:7px 9px;">
+                    <div style="font-weight:700;color:#00e5ff;margin-bottom:4px;">SYSTEM INITIALIZATION VALIDATOR (${sysVal.overallStatus})</div>
+                    ${stageRows}
+                </div>
+            `;
+        } else if (tab === 'loading') {
+            const bcState = window.BATTLE_CINEMATIC ? window.BATTLE_CINEMATIC.getState() : null;
+            body.innerHTML = `
+                <div style="background:rgba(15,23,42,0.85);border:1px solid #38bdf8;border-radius:6px;padding:7px 9px;">
+                    <div style="font-weight:700;color:#38bdf8;margin-bottom:4px;">LOADING &amp; BATTLE CINEMATIC PIPELINE</div>
+                    <div>Title Screen Active: <b>${!!window.titleScreenActive}</b> | Camera Sweep: <b>${!!window.loadingCameraSweep}</b></div>
+                    <div>Cinematic Lifecycle: <b>${bcState ? bcState.lifecycleState : 'N/A'}</b> | View Mode: <b>${window.BATTLE_CINEMATIC ? window.BATTLE_CINEMATIC.cameraViewMode : 'auto'}</b></div>
+                    <div>Stage: <b>${bcState ? `${bcState.stage}/${bcState.totalStages} (${bcState.title})` : 'N/A'}</b></div>
+                </div>
+            `;
+        } else if (tab === 'performance') {
+            const pRep = window.PERF_PROFILER && typeof window.PERF_PROFILER.getReport === 'function' ? window.PERF_PROFILER.getReport() : null;
+            body.innerHTML = `
+                <div style="background:rgba(15,23,42,0.85);border:1px solid #fbbf24;border-radius:6px;padding:7px 9px;">
+                    <div style="font-weight:700;color:#fbbf24;margin-bottom:4px;">FRAME BUDGET &amp; MEMORY PROFILER</div>
+                    <div>FPS: <b>${gSnap ? gSnap.fps : 60}</b> | Frame Time: <b>${gSnap ? gSnap.frameTimeMs : 16.6}ms</b> | Quality Tier: <b>${gSnap ? gSnap.qualityTier : 'high'}</b></div>
+                    <div>Active Projectiles: <b>${projectiles.length}</b> | Particles: <b>${particles.length}</b> | Smoke: <b>${smokeClouds.length}</b></div>
+                    <div>Profiler Summary: <span style="color:#cbd5e1;">${pRep ? JSON.stringify(pRep.averagesMs || {}) : 'Active'}</span></div>
+                </div>
+            `;
+        } else if (tab === 'inspector') {
+            const unitRows = aiRep.units.map(u => {
+                const isSel = selUnit && selUnit.unitId === u.unitId;
+                return `<option value="${u.unitId}" ${isSel ? 'selected' : ''}>${u.unitId} (${u.unitType}) - ${u.aiState}</option>`;
+            }).join('');
+            const inspectorHtml = selUnit ? `
+                <div style="background:rgba(15,23,42,0.85);border:1px solid rgba(56,189,248,0.4);border-radius:6px;padding:7px 9px;">
+                    <div style="font-weight:700;color:#38bdf8;margin-bottom:4px;">UNIT INSPECTOR: ${selUnit.unitId} (${selUnit.unitType.toUpperCase()})</div>
+                    <div>AI State: <b>${selUnit.aiState}</b> | Position: <b>(${selUnit.position.x}, ${selUnit.position.z})</b></div>
+                    <div>Target: <b>${selUnit.currentTarget}</b> @ <b>${selUnit.targetCoords ? `(${selUnit.targetCoords.x}, ${selUnit.targetCoords.z})` : 'N/A'}</b> (${selUnit.targetDistance ?? '-'}m)</div>
+                    <div>Destination: <b>${selUnit.destination ? `(${selUnit.destination.x}, ${selUnit.destination.z})` : 'N/A'}</b> (Dist: ${selUnit.distanceToDestination ?? '-'}m)</div>
+                    <div>Nav Waypoint: <b>${selUnit.navigationWaypoint ? `(${selUnit.navigationWaypoint.x}, ${selUnit.navigationWaypoint.z})` : 'N/A'}</b> | Nav Status: <b style="color:${selUnit.navigationSuccess ? '#22c55e' : '#ef4444'};">${selUnit.navigationSuccess ? 'SUCCESS' : 'FAILED'} (${selUnit.navigationResult})</b></div>
+                    <div>Config Speed: <b>${selUnit.movementSpeed}m/s</b> | Actual Displacement/s: <b>${selUnit.actualSpeedPerSec}m/s</b></div>
+                    <div>Stop Reason: <b>${selUnit.stopReason}</b> | Walkable Ground: <b style="color:${selUnit.terrainWalkable ? '#22c55e' : '#ef4444'};">${selUnit.terrainWalkable ? 'YES' : 'NO'}</b></div>
+                    <div>Bridge Assigned: <b>${selUnit.bridgeAssignment}</b> | Recovery Attempts: <b>${selUnit.lastRecoveryAttempt}</b></div>
+                    <div>Last Move: <b>${selUnit.lastSuccessfulMovementTime}s</b> | Last Attack: <b>${selUnit.lastSuccessfulAttackTime}s</b></div>
+                    <div>Last JS Error: <span style="color:${selUnit.currentError ? '#f87171' : '#94a3b8'};">${selUnit.currentError || 'None'}</span></div>
+                </div>
+            ` : `<div style="color:#94a3b8;padding:6px;">No active Zerg units on battlefield. Click "▶ ZERG SIM" to spawn and verify units.</div>`;
+            body.innerHTML = `
+                <div style="display:flex;gap:6px;align-items:center;">
+                    <span>Select Unit:</span>
+                    <select id="dbg-inspector-select" style="flex:1;background:#0f172a;color:#e2e8f0;border:1px solid #38bdf8;padding:3px;font:10px monospace;">
+                        ${unitRows || '<option value="">No units</option>'}
+                    </select>
+                </div>
+                ${inspectorHtml}
+            `;
+            const selEl = document.getElementById('dbg-inspector-select');
+            if (selEl) selEl.onchange = () => this.selectUnit(selEl.value);
+        }
     },
     update(dt) {
+        if (this.followUnitId && typeof controls !== 'undefined' && controls) {
+            const targetUnit = enemies.find(e => e && e.id === this.followUnitId && e.hp > 0 && e.mesh);
+            if (targetUnit) {
+                controls.target.lerp(targetUnit.mesh.position, Math.min(1, dt * 8.0));
+            } else {
+                this.followUnitId = null;
+            }
+        }
         if (!this.enabled) return;
         this._updateWorldViz();
         this.renderUI(false);
@@ -7635,6 +8096,7 @@ window.BATTLE_CINEMATIC = {
     totalDuration: 32.0,
     currentStage: 1,
     stageTitle: 'WIDE BATTLEFIELD ESTABLISHING SHOT',
+    cameraViewMode: 'auto', // 'auto' | 'birds_eye' | 'ground_operator'
     STAGES: [
         { id: 1, start: 0.0,  end: 3.5,  title: 'WIDE BATTLEFIELD ESTABLISHING SHOT', subtitle: 'Two autonomous AI armies clashing across the dry planetary ridge' },
         { id: 2, start: 3.5,  end: 7.0,  title: 'LOW-ANGLE TERRAN INFANTRY ADVANCE', subtitle: 'Marines, Marauders & Firebats advancing under live suppressive fire' },
@@ -7647,8 +8109,11 @@ window.BATTLE_CINEMATIC = {
         { id: 9, start: 28.0, end: 32.0, title: 'PANORAMIC COMBINED-ARMS FINALE', subtitle: 'Continuous autonomous two-faction warfare across Sector-09' }
     ],
     actors: {
+        terranHQ: null,
+        terranBarracks: null,
         station: null,
         spire: null,
+        zergHatchery: null,
         zergPool: null,
         zergSpine: null,
         tank: null,
@@ -7664,6 +8129,12 @@ window.BATTLE_CINEMATIC = {
     savedGameplayCamPos: new THREE.Vector3(),
     savedGameplayCamTarget: new THREE.Vector3(),
     hasSavedGameplayCam: false,
+
+    setCameraViewMode(mode) {
+        if (mode === 'birds_eye' || mode === 'ground_operator' || mode === 'auto') {
+            this.cameraViewMode = mode;
+        }
+    },
 
     getCurrentStageIndex() {
         return Math.max(0, Math.min(this.STAGES.length - 1, (this.currentStage || 1) - 1));
@@ -7767,7 +8238,21 @@ window.BATTLE_CINEMATIC = {
         const az = this.anchor.z;
         this.focusImpactPos.copy(this.anchor);
 
-        // Faction A (Terran Dominion Southern Ridge Fortification)
+        // Faction A (Terran Dominion Southern Ridge Base: Orbital Command HQ + Barracks + Modular Turret)
+        const hqPos = this.snapDryGround(ax - 7.8, az + 14.2);
+        const hqMesh = createEngineeredBuilding('base', false);
+        hqMesh.position.copy(hqPos);
+        if (hqMesh.userData && hqMesh.userData.scaffoldGroup) hqMesh.userData.scaffoldGroup.visible = false;
+        this.group.add(hqMesh);
+        this.actors.terranHQ = { faction: 'terran', isBuilding: true, mesh: hqMesh, pos: hqPos.clone(), hp: 3200, maxHp: 3200 };
+
+        const raxPos = this.snapDryGround(ax + 4.4, az + 13.4);
+        const raxMesh = createEngineeredBuilding('barracks', false);
+        raxMesh.position.copy(raxPos);
+        if (raxMesh.userData && raxMesh.userData.scaffoldGroup) raxMesh.userData.scaffoldGroup.visible = false;
+        this.group.add(raxMesh);
+        this.actors.terranBarracks = { faction: 'terran', isBuilding: true, mesh: raxMesh, pos: raxPos.clone(), hp: 2200, maxHp: 2200 };
+
         const stPos = this.snapDryGround(ax - 3.2, az + 11.2);
         const stationMesh = createEngineeredBuilding('turret', false);
         stationMesh.position.copy(stPos);
@@ -7798,7 +8283,15 @@ window.BATTLE_CINEMATIC = {
             cooldown: 0.4
         };
 
-        // Faction B (Zerg Swarm Northern Bio-Outpost: Spawning Pool + Spine Crawler)
+        // Faction B (Zerg Swarm Northern Bio-Base: Hive Citadel + Spawning Pool + Spine Crawler)
+        const hatchPos = this.snapDryGround(ax - 5.2, az - 14.2);
+        const hatchMesh = typeof createOrganicZergStructure === 'function'
+            ? createOrganicZergStructure('citadel')
+            : createEngineeredBuilding('base', false);
+        hatchMesh.position.copy(hatchPos);
+        this.group.add(hatchMesh);
+        this.actors.zergHatchery = { faction: 'zerg', isBuilding: true, mesh: hatchMesh, pos: hatchPos.clone(), hp: 3400, maxHp: 3400 };
+
         const poolPos = this.snapDryGround(ax + 1.4, az - 11.5);
         const poolMesh = typeof createOrganicZergStructure === 'function'
             ? createOrganicZergStructure('barracks')
@@ -7912,7 +8405,7 @@ window.BATTLE_CINEMATIC = {
                     arr.length = 0;
                 }
             }
-            const singleKeys = ['station', 'spire', 'zergPool', 'zergSpine'];
+            const singleKeys = ['terranHQ', 'terranBarracks', 'station', 'spire', 'zergHatchery', 'zergPool', 'zergSpine'];
             for (let k = 0; k < singleKeys.length; k++) {
                 const prop = singleKeys[k];
                 const st = this.actors[prop];
@@ -8146,8 +8639,8 @@ window.BATTLE_CINEMATIC = {
         this.currentStage = activeDef.id;
         this.stageTitle = activeDef.title;
 
-        const terranStructures = [this.actors.station].filter(Boolean);
-        const zergStructures = [this.actors.zergPool, this.actors.zergSpine].filter(Boolean);
+        const terranStructures = [this.actors.terranHQ, this.actors.terranBarracks, this.actors.station].filter(Boolean);
+        const zergStructures = [this.actors.zergHatchery, this.actors.zergPool, this.actors.zergSpine].filter(Boolean);
 
         // Update both independent AI armies in real time
         this.updateArmyGroup(this.actors.infantry, this.actors.enemies, zergStructures, dt);
@@ -8220,7 +8713,7 @@ window.BATTLE_CINEMATIC = {
             }
         }
 
-        // Smooth Damped Camera Tracking Live Action
+        // Smooth Damped Camera Tracking Live Action (Bird's-Eye Battlefield View vs Ground-Level Camera Operator View)
         const ax = this.anchor.x;
         const ay = this.anchor.y;
         const az = this.anchor.z;
@@ -8232,42 +8725,59 @@ window.BATTLE_CINEMATIC = {
         const camGoal = new THREE.Vector3();
         const lookGoal = new THREE.Vector3();
 
-        if (this.currentStage === 1) {
-            const a = t * 0.16;
-            camGoal.set(ax + Math.sin(a) * 32, ay + 24, az + Math.cos(a) * 32);
+        const effectiveMode = this.cameraViewMode === 'birds_eye'
+            ? 'birds_eye'
+            : (this.cameraViewMode === 'ground_operator'
+                ? 'ground_operator'
+                : ((this.currentStage === 1 || this.currentStage === 9) ? 'birds_eye' : 'ground_operator'));
+
+        if (effectiveMode === 'birds_eye') {
+            // A. Bird's-Eye Battlefield View: High angled overview showing both bases, frontlines, unit streams & terrain
+            const orbitAngle = t * 0.14;
+            camGoal.set(ax + Math.sin(orbitAngle) * 34, ay + 27 + Math.sin(t * 0.3) * 2.5, az + Math.cos(orbitAngle) * 34);
             lookGoal.set(ax, ay + 1.2, az);
-        } else if (this.currentStage === 2) {
-            camGoal.set(leadInf.x + 5.8, leadInf.y + 3.2, leadInf.z + 6.5);
-            lookGoal.set(leadZerg.x, leadZerg.y + 1.0, leadZerg.z);
-        } else if (this.currentStage === 3) {
-            camGoal.set(leadZerg.x - 6.2, leadZerg.y + 3.6, leadZerg.z - 6.4);
-            lookGoal.set(leadInf.x, leadInf.y + 1.0, leadInf.z);
-        } else if (this.currentStage === 4) {
-            camGoal.set(leadTank.x + 4.2, leadTank.y + 2.8, leadTank.z + 4.8);
-            lookGoal.set(poolPos.x, poolPos.y + 1.2, poolPos.z);
-        } else if (this.currentStage === 5) {
-            camGoal.set(leadTank.x - 3.6, leadTank.y + 2.4, leadTank.z + 3.6);
-            lookGoal.set(leadZerg.x, leadZerg.y + 1.1, leadZerg.z);
-        } else if (this.currentStage === 6) {
-            const activeProj = this.actors.projectiles[0];
-            const focusPt = activeProj ? activeProj.mesh.position : this.focusImpactPos;
-            camGoal.set(focusPt.x + 5.5, focusPt.y + 3.4, focusPt.z + 5.8);
-            lookGoal.copy(focusPt);
-        } else if (this.currentStage === 7) {
-            camGoal.set(ax - 8.5, ay + 5.2, az + 2.5);
-            lookGoal.set(ax, ay + 1.0, az - 1.5);
-        } else if (this.currentStage === 8) {
-            const stPos = this.actors.station ? this.actors.station.pos : this.anchor;
-            camGoal.set(stPos.x - 5.5, stPos.y + 4.4, stPos.z + 5.5);
-            lookGoal.set(leadZerg.x, leadZerg.y + 1.0, leadZerg.z);
         } else {
-            const p = (t - 28.0) / 4.0;
-            camGoal.set(ax + Math.sin(p * 0.6) * 26, THREE.MathUtils.lerp(ay + 14, ay + 28, p), az + 28);
-            lookGoal.set(ax, ay + 1.0, az);
+            // B. Ground-Level Camera Operator View: Low-angle dynamic tracking through active combat with subtle handheld bob
+            const bobX = Math.sin(t * 4.2) * 0.18;
+            const bobY = Math.cos(t * 6.4) * 0.12;
+            if (this.currentStage === 2 || this.currentStage === 1) {
+                camGoal.set(leadInf.x + 5.2 + bobX, leadInf.y + 2.6 + bobY, leadInf.z + 5.8);
+                lookGoal.set(leadZerg.x, leadZerg.y + 1.0, leadZerg.z);
+            } else if (this.currentStage === 3) {
+                camGoal.set(leadZerg.x - 5.6 + bobX, leadZerg.y + 2.8 + bobY, leadZerg.z - 5.8);
+                lookGoal.set(leadInf.x, leadInf.y + 1.0, leadInf.z);
+            } else if (this.currentStage === 4) {
+                camGoal.set(leadTank.x + 3.8 + bobX, leadTank.y + 2.5 + bobY, leadTank.z + 4.4);
+                lookGoal.set(poolPos.x, poolPos.y + 1.2, poolPos.z);
+            } else if (this.currentStage === 5) {
+                camGoal.set(leadTank.x - 3.4 + bobX, leadTank.y + 2.3 + bobY, leadTank.z + 3.4);
+                lookGoal.set(leadZerg.x, leadZerg.y + 1.1, leadZerg.z);
+            } else if (this.currentStage === 6) {
+                const activeProj = this.actors.projectiles[0];
+                const focusPt = activeProj ? activeProj.mesh.position : this.focusImpactPos;
+                camGoal.set(focusPt.x + 4.8 + bobX, focusPt.y + 2.8 + bobY, focusPt.z + 5.2);
+                lookGoal.copy(focusPt);
+            } else if (this.currentStage === 7) {
+                camGoal.set(ax - 7.2 + bobX, ay + 3.4 + bobY, az + 2.2);
+                lookGoal.set(ax, ay + 1.0, az - 1.5);
+            } else {
+                const stPos = this.actors.station ? this.actors.station.pos : this.anchor;
+                camGoal.set(stPos.x - 4.8 + bobX, stPos.y + 3.2 + bobY, stPos.z + 4.8);
+                lookGoal.set(leadZerg.x, leadZerg.y + 1.0, leadZerg.z);
+            }
         }
 
-        const minGroundH = (typeof getTerrainHeight === 'function' ? getTerrainHeight(camGoal.x, camGoal.z) : ay) + 2.5;
-        if (camGoal.y < minGroundH) camGoal.y = minGroundH;
+        // Prevent camera clipping through terrain or cinematic structures
+        const surfFn = typeof getSurfaceHeightWithBridges === 'function' ? getSurfaceHeightWithBridges : getTerrainHeight;
+        let minClearanceY = (typeof surfFn === 'function' ? surfFn(camGoal.x, camGoal.z) : ay) + 2.4;
+        const allCinematicBlds = [...terranStructures, ...zergStructures];
+        for (let b = 0; b < allCinematicBlds.length; b++) {
+            const bld = allCinematicBlds[b];
+            if (bld && bld.pos && Math.hypot(camGoal.x - bld.pos.x, camGoal.z - bld.pos.z) < 4.5) {
+                minClearanceY = Math.max(minClearanceY, bld.pos.y + 4.8);
+            }
+        }
+        if (camGoal.y < minClearanceY) camGoal.y = minClearanceY;
 
         this.camPosSmooth.x = THREE.MathUtils.damp(this.camPosSmooth.x, camGoal.x, 3.2, dt);
         this.camPosSmooth.y = THREE.MathUtils.damp(this.camPosSmooth.y, camGoal.y, 3.2, dt);
@@ -9067,7 +9577,7 @@ function animate(now) {
         const armyScaledEnemyCap = state.isEndless
             ? Math.min(82, 32 + Math.floor(units.length * 1.55))
             : Math.min(60, 28 + Math.floor(units.length * 0.90));
-        if (state.basePlaced && !state.missionWon && (eb.role === 'barracks' || eb.role === 'factory')) {
+        if (!window.titleScreenActive && !window.loadingCameraSweep && !state.missionWon && (eb.role === 'barracks' || eb.role === 'factory')) {
             if (!Number.isFinite(eb.spawnTimer)) {
                 eb.spawnDuration = eb.role === 'barracks' ? 5.5 : 8.5;
                 eb.spawnTimer = eb.spawnDuration * 0.5;
@@ -9247,8 +9757,8 @@ function animate(now) {
         screenShake = Math.max(0, screenShake - dt * 2.8);
     }
 
-    if (state.basePlaced && state.baseBuilding && state.baseBuilding.hp > 0 && !state.missionWon) {
-        if (state.isEndless) {
+    if (!window.titleScreenActive && !window.loadingCameraSweep && !state.missionWon && (!state.basePlaced || (state.baseBuilding && state.baseBuilding.hp > 0))) {
+        if (state.isEndless && state.baseBuilding) {
             endlessSpawnClock -= dt;
             if (endlessSpawnClock <= 0) {
                 // Scale Endless Mode enemy wave size & cap dynamically with Player Army Size!
@@ -12916,8 +13426,14 @@ window.GAME_API = {
             totalStages: bc.STAGES ? bc.STAGES.length : 10,
             title: stageObj ? stageObj.title : 'LIVE BATTLE CINEMATIC',
             subtitle: stageObj ? stageObj.subtitle : '',
-            progress: Math.min(1, Math.max(0, (bc.elapsed || 0) / (bc.totalDuration || 26.0)))
+            progress: Math.min(1, Math.max(0, (bc.elapsed || 0) / (bc.totalDuration || 26.0))),
+            viewMode: bc.cameraViewMode || 'auto'
         };
+    },
+    setBattleCinematicViewMode: (mode) => {
+        if (window.BATTLE_CINEMATIC && typeof window.BATTLE_CINEMATIC.setCameraViewMode === 'function') {
+            window.BATTLE_CINEMATIC.setCameraViewMode(mode);
+        }
     },
     restartBattleCinematic: () => {
         if (window.BATTLE_CINEMATIC && typeof window.BATTLE_CINEMATIC.restart === 'function') {
@@ -12927,6 +13443,12 @@ window.GAME_API = {
     runInitializationStep: async (stepIndex, config = {}) => {
         // Real 10-stage world initialization pipeline driven by actual engine verification
         const idx = Number(stepIndex) || 0;
+        const tStepStart = performance.now();
+        const recordVal = (name, cat, ok, details) => {
+            if (window.SYSTEM_INIT_VALIDATOR) {
+                window.SYSTEM_INIT_VALIDATOR.recordStage(name, cat, ok ? 'PASS' : 'FAIL', performance.now() - tStepStart, details);
+            }
+        };
         switch (idx) {
             case 0: {
                 // Step 1: Verify Three.js WebGLRenderer, Scene, Camera & Lighting
@@ -12935,6 +13457,7 @@ window.GAME_API = {
                     camera.aspect = window.innerWidth / Math.max(1, window.innerHeight);
                     camera.updateProjectionMatrix();
                 }
+                recordVal('Stage 1: WebGL & Camera', 'Loading', ok, 'Renderer, Scene & Camera verified');
                 return { ok, stage: 'WebGL Renderer & Tactical Camera Rig Verified' };
             }
             case 1: {
@@ -12943,6 +13466,7 @@ window.GAME_API = {
                     window.regenerateDynamicSectorMap(config.seed, config.lobbyPlayers || []);
                 }
                 const bridgeCount = Array.isArray(window.BRIDGES) ? window.BRIDGES.length : 0;
+                recordVal('Stage 2: Terrain & Bridges', 'World', true, `Bridges=${bridgeCount}`);
                 return { ok: true, stage: `Procedural Canyon & ${bridgeCount} Bridges Synthesized` };
             }
             case 2: {
@@ -12953,6 +13477,7 @@ window.GAME_API = {
                 const sampleWalkable = typeof isWalkableGround === 'function'
                     ? isWalkableGround(PLAYER_START_POS.x, PLAYER_START_POS.z)
                     : true;
+                recordVal('Stage 3: A* Navigation Grid', 'World', true, `StartPosWalkable=${sampleWalkable}`);
                 return { ok: true, walkableVerified: sampleWalkable, stage: 'A* Navigation Grid & Bridge Waypoints Calibrated' };
             }
             case 3: {
@@ -12961,11 +13486,13 @@ window.GAME_API = {
                     buildBasePlacementBarrierMeshes();
                 }
                 const gemCount = Array.isArray(window.GEM_CRATERS) ? window.GEM_CRATERS.length : 0;
+                recordVal('Stage 4: Resource Nodes', 'World', gemCount > 0, `GemCraters=${gemCount}`);
                 return { ok: true, stage: `Mineral Clusters & ${gemCount} Rich Gem Craters Active` };
             }
             case 4: {
                 // Step 5: Pre-warm 3-Faction Procedural 3D Model & Material Caches
                 const hasModels = typeof createAnimatedUnitModel === 'function' && typeof createEngineeredBuilding === 'function';
+                recordVal('Stage 5: Model & Material Factories', 'Functions & Dependencies', hasModels, '3-Faction model builders verified');
                 return { ok: hasModels, stage: '3-Faction Procedural 3D Meshes & Shaders Compiled' };
             }
             case 5: {
@@ -12973,6 +13500,7 @@ window.GAME_API = {
                 if (!state.enemyBase || enemyBuildings.length === 0) {
                     initEnemyHiveCluster();
                 }
+                recordVal('Stage 6: Zerg Hive Cluster', 'Buildings', enemyBuildings.length > 0, `ZergStructures=${enemyBuildings.length}, ZergUnits=${enemies.length}`);
                 return { ok: enemyBuildings.length > 0, stage: `Zerg Overmind Hive Cluster (${enemyBuildings.length} Bio-Structures) Online` };
             }
             case 6: {
@@ -12980,6 +13508,7 @@ window.GAME_API = {
                 if (config && Array.isArray(config.lobbyPlayers) && config.lobbyPlayers.length > 2) {
                     spawnLobbyExpansionBases(config.lobbyPlayers);
                 }
+                recordVal('Stage 7: Solaris Protoss Enclave', 'Units & Factions', true, `SolarisStructures=${solarisBuildings.length}`);
                 return { ok: true, stage: `Solaris Protoss Enclave & Warp Matrix Synchronized` };
             }
             case 7: {
@@ -12988,6 +13517,7 @@ window.GAME_API = {
                     deployBaseAtBarrier(selectedBaseBarrierId || 'alpha');
                 }
                 syncAndUpdateAutoMiningDrones(0.016);
+                recordVal('Stage 8: Orbital Command HQ', 'Buildings', true, `BasePlaced=${!!state.basePlaced}`);
                 return { ok: true, stage: 'Orbital Command HQ & Faction Harvester Drones Deployed' };
             }
             case 8: {
@@ -12995,6 +13525,7 @@ window.GAME_API = {
                 updateFogOfWarVision();
                 renderTacticalMinimap();
                 renderSC2CommandCard();
+                recordVal('Stage 9: Fog of War & Minimap', 'Loading', true, 'Vision matrix & radar ready');
                 return { ok: true, stage: 'Fog of War Vision Matrix & Tactical Radar Ready' };
             }
             case 9:
@@ -13004,6 +13535,9 @@ window.GAME_API = {
                     window.BATTLE_CINEMATIC.cleanup();
                 }
                 window.GAME_API.startMission(config);
+                if (window.SYSTEM_INIT_VALIDATOR) {
+                    window.SYSTEM_INIT_VALIDATOR.validateAllSystems();
+                }
                 renderer.render(scene, camera);
                 return { ok: true, stage: 'All Combat Systems Nominal — Entering Sector-09' };
             }
@@ -13281,6 +13815,7 @@ const hudVisibilityState = {
     showPortrait: !IS_MOBILE,
     showCenter: true,
     showObjective: !IS_MOBILE,
+    showHpBars: true,
     soundEnabled: true
 };
 
@@ -13295,6 +13830,17 @@ function syncHudVisibilityClasses() {
     container.classList.toggle('hud-hide-portrait', !hudVisibilityState.showPortrait);
     container.classList.toggle('hud-hide-center', !hudVisibilityState.showCenter);
     container.classList.toggle('hud-hide-objective', !hudVisibilityState.showObjective);
+    container.classList.toggle('hud-hide-hpbars', !hudVisibilityState.showHpBars);
+
+    if (typeof worldUi !== 'undefined' && worldUi) {
+        const pips = worldUi.querySelectorAll('.hp-pip, .combat-float');
+        pips.forEach(el => {
+            if (!hudVisibilityState.showHpBars) {
+                el.style.display = 'none';
+                el._lastDisp = 'none';
+            }
+        });
+    }
 
     const btnRestoreAll = document.getElementById('btn-restore-all-ui');
     if (btnRestoreAll) {
@@ -13324,6 +13870,8 @@ function syncHudVisibilityClasses() {
     if (chkCenter) chkCenter.checked = !!hudVisibilityState.showCenter;
     const chkObj = document.getElementById('chk-hud-objective');
     if (chkObj) chkObj.checked = !!hudVisibilityState.showObjective;
+    const chkHpBars = document.getElementById('chk-hud-hpbars');
+    if (chkHpBars) chkHpBars.checked = !!hudVisibilityState.showHpBars;
     const chkSound = document.getElementById('chk-hud-sound');
     if (chkSound && window.SFX) chkSound.checked = !window.SFX.muted;
 }
@@ -13365,6 +13913,8 @@ window.updateHudSetting = function(key, checked) {
     } else if (key === 'objective') {
         hudVisibilityState.showObjective = !!checked;
         if (checked) hudVisibilityState.minimalMobile = false;
+    } else if (key === 'hpBars') {
+        hudVisibilityState.showHpBars = !!checked;
     } else if (key === 'sound' && window.SFX) {
         window.SFX.muted = !checked;
     }
@@ -13418,15 +13968,7 @@ const AXIS_BALL_CONTROLLER = {
     canvas: null,
     ctx: null,
     readoutEl: null,
-    glCanvas: null,
-    glRenderer: null,
-    glScene: null,
-    glCamera: null,
-    planetMesh: null,
-    atmoCageMesh: null,
-    equatorRingMesh: null,
-    axisGroup: null,
-    lastBiome: null,
+    cageSpinAngle: 0,
     isDragging: false,
     dragMoved: false,
     lastPointerX: 0,
@@ -13446,113 +13988,6 @@ const AXIS_BALL_CONTROLLER = {
         const dpr = Math.min(window.devicePixelRatio || 1, 2);
         canvas.width = Math.round(78 * dpr);
         canvas.height = Math.round(78 * dpr);
-
-        // Initialize dedicated Three.js 3D WebGL scene for the 3D UI Sphere
-        try {
-            const glCanvas = document.createElement('canvas');
-            glCanvas.width = canvas.width;
-            glCanvas.height = canvas.height;
-            const glRenderer = new THREE.WebGLRenderer({
-                canvas: glCanvas,
-                alpha: true,
-                antialias: true,
-                powerPreference: 'low-power'
-            });
-            glRenderer.setSize(canvas.width, canvas.height, false);
-            glRenderer.setClearColor(0x000000, 0);
-
-            const glScene = new THREE.Scene();
-            const glCamera = new THREE.PerspectiveCamera(34, 1.0, 0.1, 20.0);
-            glCamera.position.set(0, 0, 3.85);
-            glCamera.lookAt(0, 0, 0);
-
-            const ambLight = new THREE.AmbientLight(0x90b8d8, 0.95);
-            const keyLight = new THREE.DirectionalLight(0xffffff, 1.45);
-            keyLight.position.set(2.5, 3.2, 3.0);
-            const rimLight = new THREE.DirectionalLight(0x00e5ff, 0.85);
-            rimLight.position.set(-2.5, -1.8, -1.5);
-            glScene.add(ambLight, keyLight, rimLight);
-
-            const axisGroup = new THREE.Group();
-            glScene.add(axisGroup);
-
-            // 1. Central 3D Planet Sphere with Biome-Reactive Surface Material
-            const sphereGeo = new THREE.SphereGeometry(0.68, 28, 22);
-            const sphereMat = new THREE.MeshStandardMaterial({
-                color: 0x1d4ed8,
-                emissive: 0x091e3a,
-                emissiveIntensity: 0.45,
-                roughness: 0.48,
-                metalness: 0.28
-            });
-            const planetMesh = new THREE.Mesh(sphereGeo, sphereMat);
-            axisGroup.add(planetMesh);
-
-            // 2. Outer 3D Geodesic Atmosphere / Orbital Telemetry Shell
-            const cageGeo = new THREE.SphereGeometry(0.76, 14, 10);
-            const cageMat = new THREE.MeshBasicMaterial({
-                color: 0x38bdf8,
-                wireframe: true,
-                transparent: true,
-                opacity: 0.22
-            });
-            const atmoCageMesh = new THREE.Mesh(cageGeo, cageMat);
-            axisGroup.add(atmoCageMesh);
-
-            // 3. 3D Equatorial Horizon Gimbal Ring & Polar Meridian Ring
-            const eqGeo = new THREE.TorusGeometry(0.92, 0.018, 10, 48);
-            eqGeo.rotateX(Math.PI / 2);
-            const eqMat = new THREE.MeshStandardMaterial({
-                color: 0x38bdf8,
-                emissive: 0x0284c7,
-                emissiveIntensity: 0.65,
-                roughness: 0.3,
-                metalness: 0.7
-            });
-            const equatorRingMesh = new THREE.Mesh(eqGeo, eqMat);
-            axisGroup.add(equatorRingMesh);
-
-            const merGeo = new THREE.TorusGeometry(0.88, 0.012, 8, 40);
-            const merMat = new THREE.MeshBasicMaterial({ color: 0x94a3b8, transparent: true, opacity: 0.32 });
-            const merRing = new THREE.Mesh(merGeo, merMat);
-            axisGroup.add(merRing);
-
-            // 4. 3D Axis Stems & 3D Spherical Terminal Caps (+X, -X, +Y, +Z, -Z)
-            const addAxis3D = (dirVec, hexColor, isPrimary) => {
-                const len = 1.02;
-                const stemGeo = new THREE.CylinderGeometry(isPrimary ? 0.028 : 0.018, isPrimary ? 0.028 : 0.018, len, 8);
-                stemGeo.translate(0, len * 0.5, 0);
-                const stemMat = new THREE.MeshStandardMaterial({
-                    color: hexColor,
-                    emissive: hexColor,
-                    emissiveIntensity: 0.35,
-                    roughness: 0.35,
-                    metalness: 0.5
-                });
-                const stemMesh = new THREE.Mesh(stemGeo, stemMat);
-                stemMesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dirVec.clone().normalize());
-                axisGroup.add(stemMesh);
-
-                const capGeo = new THREE.SphereGeometry(isPrimary ? 0.14 : 0.105, 14, 12);
-                const capMesh = new THREE.Mesh(capGeo, stemMat);
-                capMesh.position.copy(dirVec).multiplyScalar(len);
-                axisGroup.add(capMesh);
-            };
-            addAxis3D(new THREE.Vector3(1, 0, 0), 0xff4d6d, true);
-            addAxis3D(new THREE.Vector3(-1, 0, 0), 0x9f1239, false);
-            addAxis3D(new THREE.Vector3(0, 1, 0), 0x00ff66, true);
-            addAxis3D(new THREE.Vector3(0, 0, 1), 0x00e5ff, true);
-            addAxis3D(new THREE.Vector3(0, 0, -1), 0x0369a1, false);
-
-            this.glCanvas = glCanvas;
-            this.glRenderer = glRenderer;
-            this.glScene = glScene;
-            this.glCamera = glCamera;
-            this.planetMesh = planetMesh;
-            this.atmoCageMesh = atmoCageMesh;
-            this.equatorRingMesh = equatorRingMesh;
-            this.axisGroup = axisGroup;
-        } catch (_) {}
 
         const getLocalCoords = (e) => {
             const rect = canvas.getBoundingClientRect();
@@ -13634,38 +14069,13 @@ const AXIS_BALL_CONTROLLER = {
         });
     },
 
-    syncBiomeTheme() {
+    getBiomeColors() {
         const biome = window.ACTIVE_PLANET_BIOME || 'highland';
-        if (!this.planetMesh || this.lastBiome === biome) return;
-        this.lastBiome = biome;
-        const mat = this.planetMesh.material;
-        const cageMat = this.atmoCageMesh ? this.atmoCageMesh.material : null;
-        if (biome === 'lava') {
-            mat.color.setHex(0x3a140c);
-            mat.emissive.setHex(0xff3b00);
-            mat.emissiveIntensity = 0.72;
-            if (cageMat) cageMat.color.setHex(0xff6a00);
-        } else if (biome === 'ocean') {
-            mat.color.setHex(0x0284c7);
-            mat.emissive.setHex(0x0c4a6e);
-            mat.emissiveIntensity = 0.52;
-            if (cageMat) cageMat.color.setHex(0x38bdf8);
-        } else if (biome === 'desert') {
-            mat.color.setHex(0xd97706);
-            mat.emissive.setHex(0x451a03);
-            mat.emissiveIntensity = 0.40;
-            if (cageMat) cageMat.color.setHex(0xfbbf24);
-        } else if (biome === 'jungle') {
-            mat.color.setHex(0x15803d);
-            mat.emissive.setHex(0x052e16);
-            mat.emissiveIntensity = 0.45;
-            if (cageMat) cageMat.color.setHex(0x4ade80);
-        } else {
-            mat.color.setHex(0x1d4ed8);
-            mat.emissive.setHex(0x0f2942);
-            mat.emissiveIntensity = 0.45;
-            if (cageMat) cageMat.color.setHex(0x38bdf8);
-        }
+        if (biome === 'lava') return { hi: '#ff7b00', mid: '#7c2d12', low: '#1f0904', ring: '#ff5400' };
+        if (biome === 'ocean') return { hi: '#38bdf8', mid: '#0369a1', low: '#082f49', ring: '#00e5ff' };
+        if (biome === 'desert') return { hi: '#fbbf24', mid: '#b45309', low: '#451a03', ring: '#f59e0b' };
+        if (biome === 'jungle') return { hi: '#4ade80', mid: '#15803d', low: '#052e16', ring: '#22c55e' };
+        return { hi: '#60a5fa', mid: '#1d4ed8', low: '#091930', ring: '#38bdf8' };
     },
 
     getCameraSpherical() {
@@ -13782,6 +14192,7 @@ const AXIS_BALL_CONTROLLER = {
         const cx = w * 0.5;
         const cy = h * 0.5;
         const ballR = w * 0.36;
+        const scaleFactor = w / 78;
 
         ctx.clearRect(0, 0, w, h);
 
@@ -13800,23 +14211,6 @@ const AXIS_BALL_CONTROLLER = {
         const ux = -cosPol * sinAz, uy = sinPol, uz = -cosPol * cosAz;
         const vx = sinPol * sinAz, vy = cosPol, vz = sinPol * cosAz;
 
-        // Render the real Three.js 3D Sphere & Axis Gizmo
-        if (this.glRenderer && this.glScene && this.glCamera && this.axisGroup) {
-            this.syncBiomeTheme();
-            if (this.atmoCageMesh) {
-                this.atmoCageMesh.rotation.y += dt * 0.35;
-            }
-            const rotMat = new THREE.Matrix4().set(
-                rx, ux, vx, 0,
-                ry, uy, vy, 0,
-                rz, uz, vz, 0,
-                0,  0,  0,  1
-            ).transpose();
-            this.axisGroup.quaternion.setFromRotationMatrix(rotMat);
-            this.glRenderer.render(this.glScene, this.glCamera);
-            ctx.drawImage(this.glCanvas, 0, 0, w, h);
-        }
-
         const project3D = (wx, wy, wz) => {
             const px = wx * rx + wy * ry + wz * rz;
             const py = wx * ux + wy * uy + wz * uz;
@@ -13828,7 +14222,53 @@ const AXIS_BALL_CONTROLLER = {
             };
         };
 
-        // Define 3D Axis Nodes (+X East, -X West, +Y Top, +Z South, -Z North)
+        // 1. Render 3D-shaded planetary sphere using pure Canvas 2D radial gradients (Zero extra WebGL context for Adreno 610 safety)
+        const pal = this.getBiomeColors();
+        const sphereR = ballR * 0.72;
+        const grad = ctx.createRadialGradient(
+            cx - sphereR * 0.32,
+            cy - sphereR * 0.35,
+            sphereR * 0.08,
+            cx,
+            cy,
+            sphereR
+        );
+        grad.addColorStop(0, pal.hi);
+        grad.addColorStop(0.52, pal.mid);
+        grad.addColorStop(1, pal.low);
+
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(cx, cy, sphereR, 0, Math.PI * 2);
+        ctx.fillStyle = grad;
+        ctx.fill();
+        ctx.lineWidth = 1.2 * scaleFactor;
+        ctx.strokeStyle = pal.ring;
+        ctx.stroke();
+
+        // 2. Render 3D projected Equatorial & Meridian Orbital Rings
+        this.cageSpinAngle = (this.cageSpinAngle + dt * 0.35) % (Math.PI * 2);
+        const drawRing3D = (ringRadius, pointFn, strokeCol, alpha, width) => {
+            ctx.beginPath();
+            const steps = 28;
+            for (let i = 0; i <= steps; i++) {
+                const a = (i / steps) * Math.PI * 2;
+                const pt3 = pointFn(a, ringRadius);
+                const p = project3D(pt3.x, pt3.y, pt3.z);
+                if (i === 0) ctx.moveTo(p.sx, p.sy);
+                else ctx.lineTo(p.sx, p.sy);
+            }
+            ctx.strokeStyle = strokeCol;
+            ctx.globalAlpha = alpha;
+            ctx.lineWidth = width * scaleFactor;
+            ctx.stroke();
+        };
+
+        drawRing3D(0.92, (a, r) => ({ x: Math.cos(a) * r, y: 0, z: Math.sin(a) * r }), pal.ring, 0.65, 1.35);
+        drawRing3D(0.86, (a, r) => ({ x: 0, y: Math.sin(a) * r, z: Math.cos(a) * r }), '#94a3b8', 0.35, 1.0);
+        ctx.restore();
+
+        // 3. Define & Render 3D Axis Nodes (+X East, -X West, +Y Top, +Z South, -Z North)
         const rawNodes = [
             { id: 'e',   label: 'E',   wx:  1, wy:  0, wz:  0, color: '#ff4d6d', stem: true },
             { id: 'w',   label: 'W',   wx: -1, wy:  0, wz:  0, color: '#9f1239', stem: false },
@@ -13845,21 +14285,18 @@ const AXIS_BALL_CONTROLLER = {
         nodes.sort((a, b) => a.depth - b.depth);
         this.projectedNodes = nodes;
 
-        const scaleFactor = w / 78;
         nodes.forEach(n => {
             const isFront = n.depth >= -0.05;
             const isHovered = this.hoveredNodeId === n.id;
 
             ctx.save();
             ctx.globalAlpha = isFront ? 0.96 : 0.48;
-            if (!this.glRenderer) {
-                ctx.strokeStyle = n.color;
-                ctx.lineWidth = (n.stem ? 2.2 : 1.3) * scaleFactor;
-                ctx.beginPath();
-                ctx.moveTo(cx, cy);
-                ctx.lineTo(n.sx, n.sy);
-                ctx.stroke();
-            }
+            ctx.strokeStyle = n.color;
+            ctx.lineWidth = (n.stem ? 2.2 : 1.3) * scaleFactor;
+            ctx.beginPath();
+            ctx.moveTo(cx, cy);
+            ctx.lineTo(n.sx, n.sy);
+            ctx.stroke();
 
             const nodeR = (isHovered ? 8.2 : (n.stem ? 6.6 : 5.2)) * scaleFactor;
             ctx.beginPath();
