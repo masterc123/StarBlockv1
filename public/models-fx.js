@@ -10950,11 +10950,8 @@ function detonateTankKineticShell(pos, isSiegeArtillery = false) {
     if (window.SFX) window.SFX.playExplosion(true);
     triggerWaterRippleFX(pos.x, pos.z, isSiegeArtillery ? 2.45 : 1.85, true);
 
-    // Always carve a real 3D crater depression & permanent scorched crater rim into the terrain on Tank/Siege Tank shell impact!
+    // Single authoritative 3D terrain crater deformation + irregular ejecta scatter (no double deformation!)
     spawnBombCrater(pos, isSiegeArtillery ? 1.32 : 0.98);
-    if (typeof deformTerrainCrater === 'function') {
-        deformTerrainCrater(pos.x, pos.z, isSiegeArtillery ? 2.65 : 1.95, isSiegeArtillery ? 0.36 : 0.24);
-    }
 
     // Spawn Physics-Simulated Volumetric Combustion Plumes & Ballistic Armor-Spall Embers
     spawnSimulatedVolumetricExplosion(
@@ -11183,7 +11180,7 @@ function updateBloodPhysicsDrops(dt) {
     }
 }
 
-// Shared Procedural Radial Scorch Decal Material (Lazy-Initialized once for Permanent Battle Scars!)
+// Shared Procedural Radial Soil-Ash Blend Material (Soft, feathered earth transition — ZERO black circular outline!)
 let _permanentScorchDecalMat = null;
 let _permanentScorchDecalGeo = null;
 function getPermanentScorchAssets() {
@@ -11194,30 +11191,30 @@ function getPermanentScorchAssets() {
         const ctx = c.getContext('2d');
         ctx.clearRect(0, 0, 256, 256);
 
-        // Soft charred outer soot gradient
-        const grad = ctx.createRadialGradient(128, 128, 12, 128, 128, 122);
-        grad.addColorStop(0.0, 'rgba(10, 8, 7, 0.96)');
-        grad.addColorStop(0.38, 'rgba(22, 18, 15, 0.88)');
-        grad.addColorStop(0.68, 'rgba(34, 28, 22, 0.52)');
-        grad.addColorStop(1.0, 'rgba(20, 16, 12, 0.0)');
+        // Soft warm-earth & ash dust gradient that feathers invisibly into the surrounding soil
+        const grad = ctx.createRadialGradient(128, 128, 8, 128, 128, 120);
+        grad.addColorStop(0.0, 'rgba(68, 52, 38, 0.46)');
+        grad.addColorStop(0.42, 'rgba(78, 60, 44, 0.28)');
+        grad.addColorStop(0.75, 'rgba(86, 68, 50, 0.10)');
+        grad.addColorStop(1.0, 'rgba(86, 68, 50, 0.0)');
         ctx.fillStyle = grad;
         ctx.beginPath();
-        ctx.arc(128, 128, 122, 0, Math.PI * 2);
+        ctx.arc(128, 128, 120, 0, Math.PI * 2);
         ctx.fill();
 
-        // Jagged radial blast-ray streaks
+        // Subtle radial displaced-earth streaks (no black ring)
         ctx.save();
         ctx.translate(128, 128);
-        for (let r = 0; r < 28; r++) {
-            const ang = (r / 28) * Math.PI * 2 + (r * 0.37);
-            const len = 62 + (r % 5) * 12;
+        for (let r = 0; r < 22; r++) {
+            const ang = (r / 22) * Math.PI * 2 + (r * 0.41);
+            const len = 48 + (r % 5) * 14;
             ctx.save();
             ctx.rotate(ang);
-            ctx.fillStyle = r % 2 === 0 ? 'rgba(12, 10, 8, 0.58)' : 'rgba(42, 32, 22, 0.42)';
+            ctx.fillStyle = r % 2 === 0 ? 'rgba(74, 56, 40, 0.22)' : 'rgba(96, 74, 54, 0.16)';
             ctx.beginPath();
-            ctx.moveTo(0, -5);
+            ctx.moveTo(6, -3);
             ctx.lineTo(len, 0);
-            ctx.lineTo(0, 5);
+            ctx.lineTo(6, 3);
             ctx.closePath();
             ctx.fill();
             ctx.restore();
@@ -11228,88 +11225,94 @@ function getPermanentScorchAssets() {
         _permanentScorchDecalMat = new THREE.MeshBasicMaterial({
             map: tex,
             transparent: true,
-            opacity: 0.94,
+            opacity: 0.65,
             depthWrite: false,
             polygonOffset: true,
             polygonOffsetFactor: -2,
             polygonOffsetUnits: -2
         });
-        _permanentScorchDecalGeo = createDynamicLiquidSplashGeo(1.25, 14, 0.22, 1.0, 77);
+        _permanentScorchDecalGeo = createDynamicLiquidSplashGeo(1.15, 14, 0.34, 1.0, 77);
     }
     return { mat: _permanentScorchDecalMat, geo: _permanentScorchDecalGeo };
 }
 
-// 3D Sculpted Bomb & Explosive Projectile Impact Crater + Permanent Scorch Decal Spawner
-// Visually chronicles the intensity of ongoing battles across the terrain!
+// 3D Sculpted Bomb & Explosive Projectile Impact Crater Spawner
+// Performs a single authoritative radial-noise terrain vertex deformation and scatters 3D rock/earth ejecta!
 function spawnBombCrater(pos, scale = 1.0) {
     if (!pos) return;
     const hy = getTerrainHeight(pos.x, pos.z);
-    if (hy < -0.26) return; // Don't place dry scorch craters underwater
+    if (hy < -0.26) return; // Don't place dry craters underwater
 
-    // Merge/skip if another permanent crater is already at this exact spot (< 0.55m) to prevent excessive stacking
-    for (let i = bombCraters.length - 1; i >= Math.max(0, bombCraters.length - 25); i--) {
+    // Merge/skip if another crater is already at this exact spot (< 0.85m) to prevent excessive stacking
+    for (let i = bombCraters.length - 1; i >= Math.max(0, bombCraters.length - 30); i--) {
         const existing = bombCraters[i];
         if (existing && existing.group) {
             const dx = existing.group.position.x - pos.x;
             const dz = existing.group.position.z - pos.z;
-            if (dx * dx + dz * dz < 0.32) {
-                // Re-heat existing crater ember & slightly enlarge it!
+            if (dx * dx + dz * dz < 0.72) {
                 existing.age = 0;
                 existing.cooled = false;
-                const curS = existing.group.scale.x;
-                existing.group.scale.setScalar(Math.min(1.65, curS * 1.08));
+                if (existing.emberMat) existing.emberMat.opacity = 0.82;
                 return;
             }
         }
     }
 
-    // Deform terrain vertices slightly at impact site
+    // Single authoritative 3D terrain vertex depression + raised irregular ejecta rim + soil vertex coloring
     if (typeof deformTerrainCrater === 'function') {
-        deformTerrainCrater(pos.x, pos.z, 2.1 * scale, 0.14 * scale);
+        deformTerrainCrater(pos.x, pos.z, 2.25 * scale, 0.28 * scale, true);
     }
 
     const craterGroup = new THREE.Group();
     const newHy = getTerrainHeight(pos.x, pos.z);
-    craterGroup.position.set(pos.x, newHy + 0.025, pos.z);
+    craterGroup.position.set(pos.x, newHy, pos.z);
 
-    const norm = getTerrainNormal(pos.x, pos.z);
-    craterGroup.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), norm);
-    const finalScale = (0.72 + Math.random() * 0.28) * scale;
-    craterGroup.scale.setScalar(finalScale);
+    // 1. Irregular 3D Ejected Rock & Upturned Soil Clods scattered along the deformed rim (ZERO black circular ring!)
+    const clodCount = 5 + Math.floor(Math.random() * 3);
+    const craterRad = 1.45 * scale;
+    const soilClodMat = MAT.rock || SHARED_FX_MAT.craterScorch;
+    for (let c = 0; c < clodCount; c++) {
+        const ang = (c / clodCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.45;
+        const rDist = craterRad * (0.72 + Math.random() * 0.38);
+        const lx = Math.cos(ang) * rDist;
+        const lz = Math.sin(ang) * rDist;
+        const worldY = getTerrainHeight(pos.x + lx, pos.z + lz);
+        const clod = new THREE.Mesh(SHARED_FX_GEO.goreChunk, soilClodMat);
+        const cs = (0.22 + Math.random() * 0.20) * scale;
+        clod.scale.set(cs * 1.35, cs * 0.65, cs * 1.15);
+        clod.position.set(lx, (worldY - newHy) + 0.03, lz);
+        clod.rotation.set((Math.random() - 0.5) * 0.5, ang, (Math.random() - 0.5) * 0.5);
+        clod.receiveShadow = true;
+        craterGroup.add(clod);
+    }
 
-    // 1. Permanent Radial Blast-Ray Scorch Mark Decal on Terrain
-    const scorchAssets = getPermanentScorchAssets();
-    const scorchDecal = new THREE.Mesh(scorchAssets.geo, scorchAssets.mat);
-    scorchDecal.rotation.y = Math.random() * Math.PI * 2;
-    scorchDecal.position.y = 0.008;
-
-    // 2. 3D Sculpted Shattered Crater Rim
-    const rimMesh = new THREE.Mesh(SHARED_FX_GEO.craterRim, SHARED_FX_MAT.craterScorch);
-    rimMesh.rotation.y = Math.random() * Math.PI * 2;
-    rimMesh.receiveShadow = true;
-
-    // 3. Molten Ember Crater Pit (Cools into permanent dark charred ash over 8 seconds)
+    // 2. Temporary Hot Impact Ember Core at the bottom of the carved bowl (fades out into natural soil over 7 seconds)
     const emberMat = new THREE.MeshBasicMaterial({
-        color: 0xff6a00,
+        color: 0xff6a18,
         transparent: true,
-        opacity: 0.94,
-        side: THREE.DoubleSide
+        opacity: 0.84,
+        depthWrite: false,
+        polygonOffset: true,
+        polygonOffsetFactor: -2,
+        polygonOffsetUnits: -2
     });
     const emberFloor = new THREE.Mesh(SHARED_FX_GEO.craterCenter, emberMat);
-    emberFloor.position.y = 0.028;
+    emberFloor.scale.setScalar(0.55 * scale);
+    emberFloor.position.y = 0.025;
+    craterGroup.add(emberFloor);
 
-    craterGroup.add(scorchDecal, rimMesh, emberFloor);
     scene.add(craterGroup);
 
     bombCraters.push({
         group: craterGroup,
+        emberFloor,
         emberMat,
         age: 0,
         cooled: false
     });
 
-    // Keep up to 160 permanent battle craters across the battlefield before recycling the oldest one
-    if (bombCraters.length > 160) {
+    // Cap active crater detail groups at 64 to keep draw calls low during prolonged battles
+    if (bombCraters.length > 64) {
         const old = bombCraters.shift();
         if (old.emberMat) old.emberMat.dispose();
         scene.remove(old.group);
@@ -11322,16 +11325,18 @@ function updateBombCraters(dt) {
         const bc = bombCraters[i];
         if (bc.cooled) continue;
         bc.age += dt;
-        // Cool glowing molten ember floor over first 8 seconds into permanent dark scorched obsidian/ash
-        if (bc.age < 8.0) {
-            const coolRatio = bc.age / 8.0;
+        // Cool and fade glowing impact embers over 7 seconds so only the natural 3D soil crater and rock clods remain
+        if (bc.age < 7.0) {
+            const coolRatio = bc.age / 7.0;
             bc.emberMat.color.setRGB(
-                1.0 * (1 - coolRatio) + 0.07 * coolRatio,
-                0.42 * (1 - coolRatio) + 0.055 * coolRatio,
-                0.02 * (1 - coolRatio) + 0.045 * coolRatio
+                1.0 * (1 - coolRatio) + 0.34 * coolRatio,
+                0.42 * (1 - coolRatio) + 0.24 * coolRatio,
+                0.08 * (1 - coolRatio) + 0.16 * coolRatio
             );
+            bc.emberMat.opacity = 0.84 * (1.0 - coolRatio);
         } else {
-            bc.emberMat.color.setRGB(0.07, 0.055, 0.045);
+            bc.emberMat.opacity = 0.0;
+            if (bc.emberFloor) bc.emberFloor.visible = false;
             bc.cooled = true;
         }
     }

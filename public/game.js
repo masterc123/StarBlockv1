@@ -5680,6 +5680,36 @@ function _createSpatialGridStore() {
                     b.push(item);
                 }
             }
+        },
+        queryRadiusInto(wx, wz, radius, outArr) {
+            const targetArr = Array.isArray(outArr) ? outArr : _spatialQueryBuf;
+            targetArr.length = 0;
+            const minGx = Math.max(0, Math.floor((wx - radius + SPATIAL_GRID_HALF) / SPATIAL_GRID_CELL));
+            const maxGx = Math.min(SPATIAL_GRID_DIM - 1, Math.floor((wx + radius + SPATIAL_GRID_HALF) / SPATIAL_GRID_CELL));
+            const minGz = Math.max(0, Math.floor((wz - radius + SPATIAL_GRID_HALF) / SPATIAL_GRID_CELL));
+            const maxGz = Math.min(SPATIAL_GRID_DIM - 1, Math.floor((wz + radius + SPATIAL_GRID_HALF) / SPATIAL_GRID_CELL));
+            const rSq = radius * radius;
+            for (let gz = minGz; gz <= maxGz; gz++) {
+                const rowOff = gz * SPATIAL_GRID_DIM;
+                for (let gx = minGx; gx <= maxGx; gx++) {
+                    const cell = this.buckets[rowOff + gx];
+                    for (let k = 0; k < cell.length; k++) {
+                        const item = cell[k];
+                        if (!item) continue;
+                        const ipos = item.mesh ? item.mesh.position : item.pos;
+                        if (ipos) {
+                            const dx = ipos.x - wx;
+                            const dz = ipos.z - wz;
+                            if (dx * dx + dz * dz <= rSq) {
+                                targetArr.push(item);
+                            }
+                        } else {
+                            targetArr.push(item);
+                        }
+                    }
+                }
+            }
+            return targetArr.length;
         }
     };
 }
@@ -5692,6 +5722,7 @@ const STRUCT_COLLISION_GRID = _createSpatialGridStore();
 
 const _groundActorsScratch = [];
 const _airActorsScratch = [];
+const _spatialQueryBuf = [];
 const _structCachePool = [];
 let _structCollisionSig = '';
 
@@ -7198,6 +7229,8 @@ function findDryCinematicBattlefieldCenter() {
 }
 
 window.BATTLE_CINEMATIC = {
+    // Explicit Cinematic Lifecycle States: "UNINITIALIZED" | "INITIALIZING" | "ACTIVE" | "CLEANING" | "DISPOSED"
+    lifecycleState: 'UNINITIALIZED',
     initialized: false,
     group: null,
     time: 0,
@@ -7232,6 +7265,9 @@ window.BATTLE_CINEMATIC = {
     camPosSmooth: new THREE.Vector3(),
     camLookSmooth: new THREE.Vector3(),
     focusImpactPos: new THREE.Vector3(),
+    savedGameplayCamPos: new THREE.Vector3(),
+    savedGameplayCamTarget: new THREE.Vector3(),
+    hasSavedGameplayCam: false,
 
     getCurrentStageIndex() {
         return Math.max(0, Math.min(this.STAGES.length - 1, (this.currentStage || 1) - 1));
@@ -7248,13 +7284,34 @@ window.BATTLE_CINEMATIC = {
         return new THREE.Vector3(bx, y, bz);
     },
 
+    disposeCinematicMeshTree(rootObj) {
+        if (!rootObj || typeof rootObj.traverse !== 'function') return;
+        const sharedGeoSet = new Set(typeof SHARED_FX_GEO === 'object' && SHARED_FX_GEO ? Object.values(SHARED_FX_GEO) : []);
+        const sharedMatSet = new Set(typeof MAT === 'object' && MAT ? Object.values(MAT) : []);
+        rootObj.traverse(child => {
+            if (!child || !child.isMesh) return;
+            if (child.geometry && !sharedGeoSet.has(child.geometry) && (!child.geometry.userData || !child.geometry.userData.sharedGlobalGeo)) {
+                try { child.geometry.dispose(); } catch (e) {}
+            }
+            if (child.material) {
+                const mats = Array.isArray(child.material) ? child.material : [child.material];
+                for (let m = 0; m < mats.length; m++) {
+                    const mat = mats[m];
+                    if (mat && !sharedMatSet.has(mat) && (!mat.userData || !mat.userData.sharedGlobalMat)) {
+                        try { mat.dispose(); } catch (e) {}
+                    }
+                }
+            }
+        });
+    },
+
     spawnSimUnit(faction, role, homeX, homeZ) {
         const pos = this.snapDryGround(homeX, homeZ);
         const isAir = role === 'heli' || role === 'mutalisk';
         const mesh = createAnimatedUnitModel(role);
         mesh.position.set(pos.x, pos.y + (isAir ? 5.2 : 0), pos.z);
         mesh.rotation.y = faction === 'terran' ? Math.PI : 0;
-        this.group.add(mesh);
+        if (this.group) this.group.add(mesh);
 
         const isMelee = role === 'skitterer' || role === 'crusher' || role === 'burster';
         const isTank = role === 'tank' || role === 'siege_tank';
@@ -7286,8 +7343,25 @@ window.BATTLE_CINEMATIC = {
     },
 
     init() {
-        if (this.initialized) return;
-        this.initialized = true;
+        if (this.lifecycleState === 'ACTIVE' || this.lifecycleState === 'INITIALIZING') return;
+        if (this.group) {
+            this.cleanup();
+        }
+        this.lifecycleState = 'INITIALIZING';
+
+        if (typeof camera !== 'undefined' && camera && typeof controls !== 'undefined' && controls) {
+            this.savedGameplayCamPos.copy(camera.position);
+            this.savedGameplayCamTarget.copy(controls.target);
+            this.hasSavedGameplayCam = true;
+        }
+
+        // Ensure no orphan BattleCinematicTheatre exists in scene
+        const staleGroup = scene.getObjectByName('BattleCinematicTheatre');
+        if (staleGroup) {
+            scene.remove(staleGroup);
+            this.disposeCinematicMeshTree(staleGroup);
+        }
+
         this.group = new THREE.Group();
         this.group.name = 'BattleCinematicTheatre';
         scene.add(this.group);
@@ -7386,9 +7460,12 @@ window.BATTLE_CINEMATIC = {
 
         this.camPosSmooth.set(ax + 26, this.anchor.y + 24, az + 28);
         this.camLookSmooth.set(ax, this.anchor.y + 1.2, az);
+        this.initialized = true;
+        this.lifecycleState = 'ACTIVE';
     },
 
     spawnSimProjectile(fromPos, targetActor, wType, damage, faction) {
+        if (this.lifecycleState !== 'ACTIVE' || !this.group) return;
         const endPos = (targetActor.mesh ? targetActor.mesh.position : targetActor.pos).clone();
         endPos.y += targetActor.isAir ? 0.0 : 0.85;
         let mesh;
@@ -7419,16 +7496,85 @@ window.BATTLE_CINEMATIC = {
     },
 
     cleanup() {
+        if (this.lifecycleState === 'CLEANING') return;
+        this.lifecycleState = 'CLEANING';
+
+        // 1. Remove & dispose all cinematic projectiles, units, and structures
+        if (this.actors) {
+            const listKeys = ['projectiles', 'infantry', 'enemies', 'airUnits'];
+            for (let k = 0; k < listKeys.length; k++) {
+                const arr = this.actors[listKeys[k]];
+                if (Array.isArray(arr)) {
+                    for (let i = arr.length - 1; i >= 0; i--) {
+                        const item = arr[i];
+                        if (item && item.mesh) {
+                            if (item.mesh.parent) item.mesh.parent.remove(item.mesh);
+                            scene.remove(item.mesh);
+                            this.disposeCinematicMeshTree(item.mesh);
+                        }
+                    }
+                    arr.length = 0;
+                }
+            }
+            const singleKeys = ['station', 'spire', 'zergPool', 'zergSpine'];
+            for (let k = 0; k < singleKeys.length; k++) {
+                const prop = singleKeys[k];
+                const st = this.actors[prop];
+                if (st && st.mesh) {
+                    if (st.mesh.parent) st.mesh.parent.remove(st.mesh);
+                    scene.remove(st.mesh);
+                    this.disposeCinematicMeshTree(st.mesh);
+                }
+                this.actors[prop] = null;
+            }
+            this.actors.tank = null;
+            this.actors.tank2 = null;
+        }
+
+        // 2. Detach & dispose the BattleCinematicTheatre container group from the scene
         if (this.group) {
             this.group.visible = false;
+            if (this.group.parent) this.group.parent.remove(this.group);
+            scene.remove(this.group);
+            this.disposeCinematicMeshTree(this.group);
+            this.group = null;
         }
-        if (this.actors && Array.isArray(this.actors.projectiles)) {
-            for (let i = this.actors.projectiles.length - 1; i >= 0; i--) {
-                const p = this.actors.projectiles[i];
-                if (p && p.mesh && this.group) this.group.remove(p.mesh);
+        const lingeringGroup = scene.getObjectByName('BattleCinematicTheatre');
+        if (lingeringGroup) {
+            scene.remove(lingeringGroup);
+            this.disposeCinematicMeshTree(lingeringGroup);
+        }
+
+        // 3. Clear any leftover temporary particles/shockwaves spawned during the menu showcase
+        for (let i = projectiles.length - 1; i >= 0; i--) {
+            if (projectiles[i] && projectiles[i].mesh) scene.remove(projectiles[i].mesh);
+        }
+        projectiles.length = 0;
+
+        // 4. Restore gameplay camera, controls, and rendering state
+        if (typeof fowMesh !== 'undefined' && fowMesh) {
+            fowMesh.visible = true;
+        }
+        if (typeof controls !== 'undefined' && controls && typeof camera !== 'undefined' && camera) {
+            controls.enabled = true;
+            const focusAnchor = (state && state.baseBuilding && state.baseBuilding.pos)
+                ? state.baseBuilding.pos
+                : (typeof PLAYER_START_POS !== 'undefined' ? PLAYER_START_POS : null);
+            if (focusAnchor) {
+                const gy = typeof getSurfaceHeightWithBridges === 'function'
+                    ? getSurfaceHeightWithBridges(focusAnchor.x, focusAnchor.z)
+                    : (focusAnchor.y || 0);
+                controls.target.set(focusAnchor.x, gy, focusAnchor.z);
+                camera.position.set(focusAnchor.x, gy + 24, focusAnchor.z + 24);
+            } else if (this.hasSavedGameplayCam) {
+                camera.position.copy(this.savedGameplayCamPos);
+                controls.target.copy(this.savedGameplayCamTarget);
             }
-            this.actors.projectiles.length = 0;
+            controls.update();
         }
+
+        this.initialized = false;
+        this.lifecycleState = 'DISPOSED';
     },
 
     restart() {
@@ -7438,12 +7584,14 @@ window.BATTLE_CINEMATIC = {
     },
 
     skipToGameplay() {
+        this.cleanup();
         const startBtn = document.querySelector('[data-testid="launch-campaign-btn"]');
         if (startBtn) startBtn.click();
     },
 
     getState() {
         return {
+            lifecycleState: this.lifecycleState,
             stage: this.currentStage,
             totalStages: this.STAGES.length,
             title: this.stageTitle,
@@ -7576,8 +7724,16 @@ window.BATTLE_CINEMATIC = {
     },
 
     update(dt, nowMs) {
-        if (!this.initialized) this.init();
-        if (!this.group) return;
+        if (!window.titleScreenActive && !window.loadingCameraSweep) {
+            if (this.lifecycleState === 'ACTIVE' || this.initialized || this.group) {
+                this.cleanup();
+            }
+            return;
+        }
+        if (this.lifecycleState === 'UNINITIALIZED' || this.lifecycleState === 'DISPOSED' || !this.initialized) {
+            this.init();
+        }
+        if (this.lifecycleState !== 'ACTIVE' || !this.group) return;
         this.group.visible = true;
 
         this.time = (this.time + dt) % this.cycleDuration;
@@ -7818,8 +7974,8 @@ function animate(now) {
         return;
     }
 
-    if (window.BATTLE_CINEMATIC && window.BATTLE_CINEMATIC.group && window.BATTLE_CINEMATIC.group.visible) {
-        window.BATTLE_CINEMATIC.group.visible = false;
+    if (window.BATTLE_CINEMATIC && (window.BATTLE_CINEMATIC.lifecycleState === 'ACTIVE' || window.BATTLE_CINEMATIC.initialized || window.BATTLE_CINEMATIC.group)) {
+        window.BATTLE_CINEMATIC.cleanup();
     }
 
     fowMesh.visible = true;
@@ -10569,6 +10725,16 @@ function animate(now) {
                 }
             }
 
+            // Lava Planet Environmental Hazard: Ground units touching molten lava rivers/ponds suffer periodic thermal burn damage
+            if (!u.isAir && window.ACTIVE_PLANET_BIOME === 'lava' && typeof isPointInWaterPond === 'function' && isPointInWaterPond(u.mesh.position.x, u.mesh.position.z, -0.18)) {
+                u.hp -= 12.0 * dt;
+                u.lavaBurnTick = (u.lavaBurnTick || 0) - dt;
+                if (u.lavaBurnTick <= 0) {
+                    u.lavaBurnTick = 0.65;
+                    triggerSparks(u.mesh.position);
+                }
+            }
+
             if (inViewport) {
                 if (u.isMechanical && typeof window.updateMechanicalUnitDamageDeformation === 'function') {
                     window.updateMechanicalUnitDamageDeformation(u);
@@ -10587,184 +10753,268 @@ function animate(now) {
         // --- ZERG OVERMIND TACTICAL EVALUATION: Detect When Losing & Coordinate Multi-Corridor Flanking ---
         const isZergLosing = (units.length > enemies.length * 1.05) || (enemyBuildings.length < 4) || (state.kills >= 12);
 
+        // Verify that ALLY_GRID is populated when living friendly units exist
+        if (units.length > 0 && ALLY_GRID.activeIndices.length === 0) {
+            rebuildFrameSpatialGrids();
+        }
+
         // Update Enemy Zerg Units (Ground Bio-Swarm + Flying Mutalisk Leviathans + Adaptive Flanking AI + Stuck Babyspot Calibration)
         if (perfProf) perfProf.begin('enemyAI');
         for (let i = enemies.length - 1; i >= 0; i--) {
             const e = enemies[i];
-            if (e.slowTimer && e.slowTimer > 0) e.slowTimer = Math.max(0, e.slowTimer - dt);
-            const concussiveSlowMult = (e.slowTimer && e.slowTimer > 0) ? 0.52 : 1.0;
-            const enemyEnvMod = (!e.isAir && typeof window.getEnvironmentalTacticalModifiers === 'function')
-                ? window.getEnvironmentalTacticalModifiers(e.mesh.position.x, e.mesh.position.z, false, false)
-                : null;
-            const enemyRoadMult = (enemyEnvMod && enemyEnvMod.speedMult) ? enemyEnvMod.speedMult : 1.0;
-            const effEnemySpeed = e.speed * weatherSpdMult * concussiveSlowMult * enemyRoadMult;
-            if (e.hp <= 0) {
-                spawnXenoBugGoreExplosion(e.mesh.position, e.variant === 'crusher' || e.variant === 'behemoth', e.variant === 'burster');
-                e.hb.root.remove();
-                if (e.variant === 'burster') {
-                    if (typeof spawnScavengerPostDeathDebris === 'function') {
-                        spawnScavengerPostDeathDebris(e.mesh.position, 'infantry', true, false);
-                    }
-                    scene.remove(e.mesh);
-                } else {
-                    spawnDeathCorpse(e.mesh, true, e.lastHitImpulse, e.lastHitHeavy);
-                }
-                enemies.splice(i, 1);
+            if (!e || !e.mesh) continue;
+            if (!e.id) {
+                window._zergUnitSeq = (window._zergUnitSeq || 0) + 1;
+                e.id = `zerg_${e.variant || 'unit'}_${window._zergUnitSeq}`;
+            }
+            try {
+                if (e.slowTimer && e.slowTimer > 0) e.slowTimer = Math.max(0, e.slowTimer - dt);
+                const concussiveSlowMult = (e.slowTimer && e.slowTimer > 0) ? 0.52 : 1.0;
+                const enemyEnvMod = (!e.isAir && typeof window.getEnvironmentalTacticalModifiers === 'function')
+                    ? window.getEnvironmentalTacticalModifiers(e.mesh.position.x, e.mesh.position.z, false, false)
+                    : null;
+                const enemyRoadMult = (enemyEnvMod && enemyEnvMod.speedMult) ? enemyEnvMod.speedMult : 1.0;
+                const effEnemySpeed = Math.max(1.2, (e.speed || 3.2) * weatherSpdMult * concussiveSlowMult * enemyRoadMult);
 
-                state.req += e.reward;
-                state.kills++;
-                if (state.kills % 10 === 0) {
-                    state.wave++;
-                    if (state.baseBuilding) {
-                        spawnCombatFloat(state.baseBuilding.pos, `WAVE #${state.wave} (${getWaveStrengthMultiplier()}x)`, '#ffaa00');
+                // Lava Planet Environmental Hazard: Ground Zerg units in molten lava take thermal burn damage
+                if (!e.isAir && window.ACTIVE_PLANET_BIOME === 'lava' && typeof isPointInWaterPond === 'function' && isPointInWaterPond(e.mesh.position.x, e.mesh.position.z, -0.18)) {
+                    e.hp -= 12.0 * dt;
+                    e.lavaBurnTick = (e.lavaBurnTick || 0) - dt;
+                    if (e.lavaBurnTick <= 0) {
+                        e.lavaBurnTick = 0.65;
+                        triggerSparks(e.mesh.position);
                     }
                 }
-                updateHUD();
-                continue;
-            }
 
-            e.cooldown -= dt;
-            if (!e.faction) e.faction = 'zerg';
-            if (!e.aiState || e.aiState === 'staging' || e.aiState === 'charge') {
-                e.aiState = 'MOVING';
-            }
+                if (e.hp <= 0) {
+                    e.aiState = 'DEAD';
+                    spawnXenoBugGoreExplosion(e.mesh.position, e.variant === 'crusher' || e.variant === 'behemoth', e.variant === 'burster');
+                    if (e.hb && e.hb.root) e.hb.root.remove();
+                    if (e.variant === 'burster') {
+                        if (typeof spawnScavengerPostDeathDebris === 'function') {
+                            spawnScavengerPostDeathDebris(e.mesh.position, 'infantry', true, false);
+                        }
+                        scene.remove(e.mesh);
+                    } else {
+                        spawnDeathCorpse(e.mesh, true, e.lastHitImpulse, e.lastHitHeavy);
+                    }
+                    enemies.splice(i, 1);
 
-            // Explicit 7-State Machine Entry: SPAWNING -> MOVING
-            if (e.aiState === 'SPAWNING') {
-                e.aiStateTimer = (e.aiStateTimer === undefined ? 0.25 : e.aiStateTimer) - dt;
-                if (e.rallyPos && !e.isAir) {
-                    const rdx = e.rallyPos.x - e.mesh.position.x;
-                    const rdz = e.rallyPos.z - e.mesh.position.z;
-                    const rLen = Math.hypot(rdx, rdz);
-                    if (rLen > 0.25) {
-                        const stepDir = computeSafeGroundStep(e.mesh.position, e.rallyPos, effEnemySpeed, dt, e, enemies, buildings, enemyBuildings);
-                        if (stepDir.lengthSq() > 0.0001) {
-                            e.mesh.position.addScaledVector(stepDir, effEnemySpeed * dt);
-                            alignGroundUnitToTerrain(e.mesh, e.mesh.position.x + stepDir.x, e.mesh.position.z + stepDir.z, dt);
+                    state.req += (e.reward || 15);
+                    state.kills++;
+                    if (state.kills % 10 === 0) {
+                        state.wave++;
+                        if (state.baseBuilding) {
+                            spawnCombatFloat(state.baseBuilding.pos, `WAVE #${state.wave} (${getWaveStrengthMultiplier()}x)`, '#ffaa00');
                         }
                     }
+                    updateHUD();
+                    continue;
                 }
-                if (e.aiStateTimer <= 0) {
+
+                e.cooldown = (e.cooldown || 0) - dt;
+                if (!e.faction) e.faction = 'zerg';
+                if (!e.aiState || e.aiState === 'staging' || e.aiState === 'charge' || e.aiState === 'IDLE') {
                     e.aiState = 'MOVING';
                 }
-            }
 
-            if ((isZergLosing || e.isFlanker) && !e.flankTactic) {
-                e.isFlanker = true;
-                const tactics = ['west_bridge_pincer', 'east_bridge_pincer', 'canyon_rim_envelopment', 'rear_eco_raid'];
-                e.flankTactic = tactics[i % tactics.length];
-                e.flankSign = (i % 2 === 0) ? 1 : -1;
-            }
-
-            // Periodically calibrate preferred bridge based on stuck babyspot heatmap + player turret concentration
-            e.bridgeCalibTimer = (e.bridgeCalibTimer || 0) - dt;
-            if (!e.isAir && e.bridgeCalibTimer <= 0 && typeof RIVER_BRIDGES !== 'undefined' && RIVER_BRIDGES.length > 0) {
-                e.bridgeCalibTimer = 2.8 + Math.random() * 1.4;
-                let bestBrIdx = e.preferredBridgeIdx ?? (i % RIVER_BRIDGES.length);
-                let bestScore = Infinity;
-                for (let bi = 0; bi < RIVER_BRIDGES.length; bi++) {
-                    const bWorld = typeof riverCoordsToWorld === 'function' ? riverCoordsToWorld(RIVER_BRIDGES[bi].sCoord, 0) : { x: 0, z: 0 };
-                    const stuckPen = typeof window.getNavStuckPenalty === 'function' ? window.getNavStuckPenalty(bWorld.x, bWorld.z) * 14.0 : 0;
-                    let turretThreat = 0;
-                    for (let k = 0; k < buildings.length; k++) {
-                        const b = buildings[k];
-                        if (b && b.type === 'turret' && b.hp > 0) {
-                            const dB = Math.hypot(b.pos.x - bWorld.x, b.pos.z - bWorld.z);
-                            if (dB < 22.0) turretThreat += (22.0 - dB) * 1.4;
+                // Helper to advance a ground Zerg unit toward a target position with guaranteed fallback movement & unsticking
+                const advanceGroundZergToward = (goalPos) => {
+                    if (!goalPos) return false;
+                    const navPt = getGroundNavigationWaypoint(e.mesh.position, goalPos, e) || goalPos;
+                    const stepDir = computeSafeGroundStep(e.mesh.position, navPt, effEnemySpeed, dt, e, enemies, buildings, enemyBuildings);
+                    let didMove = false;
+                    if (stepDir && stepDir.lengthSq() > 0.0001) {
+                        e.mesh.position.addScaledVector(stepDir, effEnemySpeed * dt);
+                        alignGroundUnitToTerrain(e.mesh, e.mesh.position.x + stepDir.x, e.mesh.position.z + stepDir.z, dt);
+                        e.lastNavResult = 'waypoint_step';
+                        e.lastMoveTime = state.elapsedSec;
+                        didMove = true;
+                    } else {
+                        // Fallback Direct Steering when computeSafeGroundStep returns zero vector
+                        const fdx = navPt.x - e.mesh.position.x;
+                        const fdz = navPt.z - e.mesh.position.z;
+                        const fLen = Math.hypot(fdx, fdz);
+                        if (fLen > 0.05) {
+                            const baseAng = Math.atan2(fdx, fdz);
+                            const tryAngles = [0, 0.52, -0.52, 1.05, -1.05, 1.57, -1.57];
+                            const stepLen = effEnemySpeed * dt;
+                            for (let aIdx = 0; aIdx < tryAngles.length; aIdx++) {
+                                const ang = baseAng + tryAngles[aIdx];
+                                const sx = Math.sin(ang);
+                                const sz = Math.cos(ang);
+                                const nx = e.mesh.position.x + sx * stepLen;
+                                const nz = e.mesh.position.z + sz * stepLen;
+                                if (typeof isWalkableGround !== 'function' || isWalkableGround(nx, nz, (e.radius || 0.5) * 0.45) || aIdx === tryAngles.length - 1) {
+                                    e.mesh.position.x = nx;
+                                    e.mesh.position.z = nz;
+                                    alignGroundUnitToTerrain(e.mesh, nx + sx, nz + sz, dt);
+                                    e.lastNavResult = aIdx === 0 ? 'direct_fallback' : 'angled_fallback';
+                                    e.lastMoveTime = state.elapsedSec;
+                                    didMove = true;
+                                    break;
+                                }
+                            }
+                        } else {
+                            e.lastNavResult = 'at_waypoint';
                         }
                     }
-                    const tacticBias = (e.flankTactic === 'west_bridge_pincer' && bi === 0) ? -12.0
-                        : ((e.flankTactic === 'east_bridge_pincer' && bi === RIVER_BRIDGES.length - 1) ? -12.0 : 0);
-                    const totalScore = stuckPen + turretThreat + tacticBias;
-                    if (totalScore < bestScore) {
-                        bestScore = totalScore;
-                        bestBrIdx = bi;
+                    // Always runworld-position stuck detection even when stepDir was zero
+                    checkAndUnstickGroundUnit(e, navPt, dt);
+                    return didMove;
+                };
+
+                // Explicit 7-State Machine Entry: SPAWNING -> MOVING
+                if (e.aiState === 'SPAWNING') {
+                    e.aiStateTimer = (e.aiStateTimer === undefined ? 0.25 : e.aiStateTimer) - dt;
+                    if (e.rallyPos && !e.isAir) {
+                        const rLen = Math.hypot(e.rallyPos.x - e.mesh.position.x, e.rallyPos.z - e.mesh.position.z);
+                        if (rLen > 0.25) {
+                            advanceGroundZergToward(e.rallyPos);
+                        }
+                    }
+                    if (e.aiStateTimer <= 0) {
+                        e.aiState = 'MOVING';
                     }
                 }
-                if (bestBrIdx !== e.preferredBridgeIdx) {
-                    e.preferredBridgeIdx = bestBrIdx;
-                    e.navWaypoints = null;
+
+                if ((isZergLosing || e.isFlanker) && !e.flankTactic) {
+                    e.isFlanker = true;
+                    const tactics = ['west_bridge_pincer', 'east_bridge_pincer', 'canyon_rim_envelopment', 'rear_eco_raid'];
+                    e.flankTactic = tactics[i % tactics.length];
+                    e.flankSign = (i % 2 === 0) ? 1 : -1;
                 }
-            }
 
-            // Target Selection with Hysteresis (Prevent target switching every frame & prioritize hostile units when closer than buildings)
-            e.targetLockTimer = Math.max(0, (e.targetLockTimer || 0) - dt);
-            let bestTarget = null, bestDist = Infinity, isBuildingTarget = false;
+                // Periodically calibrate preferred bridge based on stuck babyspot heatmap + player turret concentration
+                e.bridgeCalibTimer = (e.bridgeCalibTimer || 0) - dt;
+                if (!e.isAir && e.bridgeCalibTimer <= 0 && typeof RIVER_BRIDGES !== 'undefined' && RIVER_BRIDGES.length > 0) {
+                    e.bridgeCalibTimer = 2.8 + Math.random() * 1.4;
+                    let bestBrIdx = e.preferredBridgeIdx ?? (i % RIVER_BRIDGES.length);
+                    let bestScore = Infinity;
+                    for (let bi = 0; bi < RIVER_BRIDGES.length; bi++) {
+                        if (RIVER_BRIDGES[bi].destroyed) continue;
+                        const bWorld = typeof riverCoordsToWorld === 'function' ? riverCoordsToWorld(RIVER_BRIDGES[bi].sCoord, 0) : { x: 0, z: 0 };
+                        const stuckPen = typeof window.getNavStuckPenalty === 'function' ? window.getNavStuckPenalty(bWorld.x, bWorld.z) * 14.0 : 0;
+                        let turretThreat = 0;
+                        for (let k = 0; k < buildings.length; k++) {
+                            const b = buildings[k];
+                            if (b && b.type === 'turret' && b.hp > 0 && b.pos) {
+                                const dB = Math.hypot(b.pos.x - bWorld.x, b.pos.z - bWorld.z);
+                                if (dB < 22.0) turretThreat += (22.0 - dB) * 1.4;
+                            }
+                        }
+                        const tacticBias = (e.flankTactic === 'west_bridge_pincer' && bi === 0) ? -12.0
+                            : ((e.flankTactic === 'east_bridge_pincer' && bi === RIVER_BRIDGES.length - 1) ? -12.0 : 0);
+                        const totalScore = stuckPen + turretThreat + tacticBias;
+                        if (totalScore < bestScore) {
+                            bestScore = totalScore;
+                            bestBrIdx = bi;
+                        }
+                    }
+                    if (bestBrIdx !== e.preferredBridgeIdx) {
+                        e.preferredBridgeIdx = bestBrIdx;
+                        e.navWaypoints = null;
+                    }
+                }
 
-            // Check if current locked target is still valid and reachable
-            if (e.lockedTarget && e.lockedTarget.hp > 0 && e.targetLockTimer > 0) {
-                const lt = e.lockedTarget;
-                const ltIsBld = !lt.mesh || buildings.includes(lt) || (typeof solarisBuildings !== 'undefined' && solarisBuildings.includes(lt));
-                const ltPos = ltIsBld ? lt.pos : (lt.mesh ? lt.mesh.position : null);
-                if (ltPos && !(lt.isAir && e.range < 4.0)) {
-                    bestTarget = lt;
-                    isBuildingTarget = ltIsBld;
-                    bestDist = Math.hypot(ltPos.x - e.mesh.position.x, ltPos.z - e.mesh.position.z);
-                } else {
+                // Target Selection with Hysteresis (Prevent target switching every frame & prioritize hostile units when closer than buildings)
+                // NOTE: Fog-of-War visibility NEVER blocks AI target selection or simulation; it only affects rendering below!
+                e.targetLockTimer = Math.max(0, (e.targetLockTimer || 0) - dt);
+                let bestTarget = null, bestDist = Infinity, isBuildingTarget = false;
+
+                // Validate lockedTarget before accessing position, mesh, health, or faction
+                if (e.lockedTarget && typeof e.lockedTarget.hp === 'number' && e.lockedTarget.hp > 0 && e.targetLockTimer > 0) {
+                    const lt = e.lockedTarget;
+                    const ltIsBld = Boolean(!lt.mesh || buildings.includes(lt) || (typeof solarisBuildings !== 'undefined' && solarisBuildings.includes(lt)) || lt === state.baseBuilding);
+                    const ltPos = ltIsBld ? lt.pos : (lt.mesh ? lt.mesh.position : lt.pos);
+                    if (ltPos && Number.isFinite(ltPos.x) && Number.isFinite(ltPos.z) && !(lt.isAir && e.range < 4.0)) {
+                        bestTarget = lt;
+                        isBuildingTarget = ltIsBld;
+                        bestDist = Math.hypot(ltPos.x - e.mesh.position.x, ltPos.z - e.mesh.position.z);
+                    } else {
+                        e.lockedTarget = null;
+                    }
+                } else if (e.lockedTarget && (!e.lockedTarget.hp || e.lockedTarget.hp <= 0)) {
                     e.lockedTarget = null;
                 }
-            }
 
-            if (!bestTarget) {
-                let closestUnit = null, closestUnitDist = Infinity;
-                const nearAlliesCount = ALLY_GRID.queryRadiusInto(e.mesh.position.x, e.mesh.position.z, 38.0, _spatialQueryBuf);
-                if (nearAlliesCount > 0) {
-                    for (let ai = 0; ai < nearAlliesCount; ai++) {
-                        const u = _spatialQueryBuf[ai];
-                        if (!u || u.hp <= 0 || (u.isAir && e.range < 4.0)) continue;
-                        const d = Math.hypot(u.mesh.position.x - e.mesh.position.x, u.mesh.position.z - e.mesh.position.z);
-                        if (d < closestUnitDist) { closestUnitDist = d; closestUnit = u; }
+                if (!bestTarget) {
+                    let closestUnit = null, closestUnitDist = Infinity;
+                    const nearAlliesCount = (ALLY_GRID && typeof ALLY_GRID.queryRadiusInto === 'function')
+                        ? ALLY_GRID.queryRadiusInto(e.mesh.position.x, e.mesh.position.z, 38.0, _spatialQueryBuf)
+                        : 0;
+                    if (nearAlliesCount > 0) {
+                        for (let ai = 0; ai < nearAlliesCount; ai++) {
+                            const u = _spatialQueryBuf[ai];
+                            if (!u || typeof u.hp !== 'number' || u.hp <= 0 || !u.mesh || !u.mesh.position || (u.isAir && e.range < 4.0)) continue;
+                            const d = Math.hypot(u.mesh.position.x - e.mesh.position.x, u.mesh.position.z - e.mesh.position.z);
+                            if (d < closestUnitDist) { closestUnitDist = d; closestUnit = u; }
+                        }
                     }
-                } else {
-                    for (let ui = 0; ui < units.length; ui++) {
-                        const u = units[ui];
-                        if (!u || u.hp <= 0 || (u.isAir && e.range < 4.0)) continue;
-                        const d = Math.hypot(u.mesh.position.x - e.mesh.position.x, u.mesh.position.z - e.mesh.position.z);
-                        if (d < closestUnitDist) { closestUnitDist = d; closestUnit = u; }
+                    // CRITICAL FIX: Never treat an empty or non-matching spatial-grid query as proof that no targets exist!
+                    // Always fall back to a full valid-target scan over `units` whenever `closestUnit` is still null.
+                    if (!closestUnit) {
+                        for (let ui = 0; ui < units.length; ui++) {
+                            const u = units[ui];
+                            if (!u || typeof u.hp !== 'number' || u.hp <= 0 || !u.mesh || !u.mesh.position || (u.isAir && e.range < 4.0)) continue;
+                            const d = Math.hypot(u.mesh.position.x - e.mesh.position.x, u.mesh.position.z - e.mesh.position.z);
+                            if (d < closestUnitDist) { closestUnitDist = d; closestUnit = u; }
+                        }
                     }
-                }
 
-                let closestBld = null, closestBldDist = Infinity;
-                const preferSolarisBase = (!state.solarisHostile && typeof solarisBuildings !== 'undefined' && solarisBuildings.length > 0 && (i % 3 === 0));
-                for (let bi = 0; bi < buildings.length; bi++) {
-                    const b = buildings[bi];
-                    if (!b || b.hp <= 0) continue;
-                    let d = Math.hypot(b.pos.x - e.mesh.position.x, b.pos.z - e.mesh.position.z);
-                    if (preferSolarisBase && d > 16.0) d *= 1.25;
-                    if (d < closestBldDist) { closestBldDist = d; closestBld = b; }
-                }
-                if (!state.solarisHostile && typeof solarisBuildings !== 'undefined') {
-                    for (let sbi = 0; sbi < solarisBuildings.length; sbi++) {
-                        const sb = solarisBuildings[sbi];
-                        if (!sb || sb.hp <= 0) continue;
-                        let d = Math.hypot(sb.pos.x - e.mesh.position.x, sb.pos.z - e.mesh.position.z);
-                        if (preferSolarisBase) d *= 0.75;
-                        if (d < closestBldDist) { closestBldDist = d; closestBld = sb; }
+                    let closestBld = null, closestBldDist = Infinity;
+                    const preferSolarisBase = (!state.solarisHostile && typeof solarisBuildings !== 'undefined' && solarisBuildings.length > 0 && (i % 3 === 0));
+                    for (let bi = 0; bi < buildings.length; bi++) {
+                        const b = buildings[bi];
+                        if (!b || typeof b.hp !== 'number' || b.hp <= 0 || !b.pos) continue;
+                        let d = Math.hypot(b.pos.x - e.mesh.position.x, b.pos.z - e.mesh.position.z);
+                        if (preferSolarisBase && d > 16.0) d *= 1.25;
+                        if (d < closestBldDist) { closestBldDist = d; closestBld = b; }
                     }
-                }
+                    if (state.baseBuilding && state.baseBuilding.hp > 0 && state.baseBuilding.pos) {
+                        const dHq = Math.hypot(state.baseBuilding.pos.x - e.mesh.position.x, state.baseBuilding.pos.z - e.mesh.position.z);
+                        if (dHq < closestBldDist) {
+                            closestBldDist = dHq;
+                            closestBld = state.baseBuilding;
+                        }
+                    }
+                    if (!state.solarisHostile && typeof solarisBuildings !== 'undefined') {
+                        for (let sbi = 0; sbi < solarisBuildings.length; sbi++) {
+                            const sb = solarisBuildings[sbi];
+                            if (!sb || typeof sb.hp !== 'number' || sb.hp <= 0 || !sb.pos) continue;
+                            let d = Math.hypot(sb.pos.x - e.mesh.position.x, sb.pos.z - e.mesh.position.z);
+                            if (preferSolarisBase) d *= 0.75;
+                            if (d < closestBldDist) { closestBldDist = d; closestBld = sb; }
+                        }
+                    }
 
-                // Attack hostile units when they are closer than buildings; attack buildings when closer or no units exist
-                if (closestUnit && closestUnitDist <= closestBldDist + 1.5) {
-                    bestTarget = closestUnit;
-                    bestDist = closestUnitDist;
-                    isBuildingTarget = false;
-                } else if (closestBld) {
-                    bestTarget = closestBld;
-                    bestDist = closestBldDist;
-                    isBuildingTarget = true;
-                }
+                    // Attack hostile units when they are closer than buildings; attack buildings when closer or no units exist
+                    if (closestUnit && closestUnitDist <= closestBldDist + 1.5) {
+                        bestTarget = closestUnit;
+                        bestDist = closestUnitDist;
+                        isBuildingTarget = false;
+                    } else if (closestBld) {
+                        bestTarget = closestBld;
+                        bestDist = closestBldDist;
+                        isBuildingTarget = true;
+                    } else if (closestUnit) {
+                        bestTarget = closestUnit;
+                        bestDist = closestUnitDist;
+                        isBuildingTarget = false;
+                    }
 
-                if (bestTarget) {
-                    e.lockedTarget = bestTarget;
-                    e.targetLockTimer = 0.75;
-                }
-            } else {
-                // Even while locked, if a hostile unit engages us at point-blank range (< 5.5m) while targeting a distant building, switch to the closer unit
-                if (isBuildingTarget && bestDist > 6.5) {
-                    const nearCount = ALLY_GRID.queryRadiusInto(e.mesh.position.x, e.mesh.position.z, 6.0, _spatialQueryBuf);
+                    if (bestTarget) {
+                        e.lockedTarget = bestTarget;
+                        e.targetLockTimer = 0.75;
+                    }
+                } else if (isBuildingTarget && bestDist > 6.5) {
+                    // Even while locked on a distant building, switch to a hostile unit that engages at close range (< 6.0m)
+                    const nearCount = (ALLY_GRID && typeof ALLY_GRID.queryRadiusInto === 'function')
+                        ? ALLY_GRID.queryRadiusInto(e.mesh.position.x, e.mesh.position.z, 6.0, _spatialQueryBuf)
+                        : 0;
                     for (let ai = 0; ai < nearCount; ai++) {
                         const u = _spatialQueryBuf[ai];
-                        if (!u || u.hp <= 0 || (u.isAir && e.range < 4.0)) continue;
+                        if (!u || typeof u.hp !== 'number' || u.hp <= 0 || !u.mesh || !u.mesh.position || (u.isAir && e.range < 4.0)) continue;
                         const dU = Math.hypot(u.mesh.position.x - e.mesh.position.x, u.mesh.position.z - e.mesh.position.z);
                         if (dU < bestDist - 1.5) {
                             bestTarget = u;
@@ -10776,252 +11026,257 @@ function animate(now) {
                         }
                     }
                 }
-            }
 
-            if (!bestTarget) {
-                e.aiState = 'SEARCHING';
-                if (state.baseBuilding && state.baseBuilding.hp > 0) {
-                    bestTarget = state.baseBuilding;
-                    isBuildingTarget = true;
-                    bestDist = Math.hypot(state.baseBuilding.pos.x - e.mesh.position.x, state.baseBuilding.pos.z - e.mesh.position.z);
-                } else {
-                    bestTarget = { pos: (state.baseBuilding && state.baseBuilding.pos) || PLAYER_START_POS, hp: 1000, maxHp: 1000 };
-                    isBuildingTarget = true;
-                    bestDist = Math.hypot(bestTarget.pos.x - e.mesh.position.x, bestTarget.pos.z - e.mesh.position.z);
-                }
-            }
-
-            if (bestTarget) {
-                const trueTPos = isBuildingTarget ? bestTarget.pos : bestTarget.mesh.position;
-                bestDist = Math.hypot(trueTPos.x - e.mesh.position.x, trueTPos.z - e.mesh.position.z);
-            }
-
-            let moving = false;
-
-            if ((e.variant === 'skitterer' || e.variant === 'burster') && !e.isAir) {
-                e.burrowCooldown = (e.burrowCooldown || 0) - dt;
-                if (!e.burrowed && e.burrowCooldown <= 0 && bestDist > 16.0 && Math.abs(e.mesh.position.z) < 22 && Math.random() < 0.015) {
-                    e.burrowed = true;
-                    e.burrowTimer = 2.4;
-                    e.mesh.position.y -= 0.45;
-                }
-                if (e.burrowed) {
-                    e.burrowTimer = (e.burrowTimer === undefined ? 2.4 : e.burrowTimer) - dt;
-                    if (bestDist <= 9.5 || e.burrowTimer <= 0 || isZergLosing) {
-                        e.burrowed = false;
-                        e.mesh.position.y = getTerrainHeight(e.mesh.position.x, e.mesh.position.z);
-                        e.burrowCooldown = 18.0;
-                        e.aiState = 'MOVING';
-                        if (bestDist <= 9.5) {
-                            spawnCombatFloat(e.mesh.position, 'AMBUSH!', '#ff2a4b');
-                        }
-                    } else {
-                        updateUnitAnimation(e.mesh, dt, false, null);
-                        continue;
-                    }
-                }
-            }
-
-            let rawTargetPos = isBuildingTarget ? (bestTarget.pos || PLAYER_START_POS) : (bestTarget.mesh ? bestTarget.mesh.position : bestTarget.pos);
-            if (!rawTargetPos) {
-                rawTargetPos = PLAYER_START_POS;
-            }
-            let attackNavTarget = rawTargetPos;
-
-            if ((isZergLosing || e.isFlanker) && bestDist > 10.5) {
-                const toTargetX = rawTargetPos.x - e.mesh.position.x;
-                const toTargetZ = rawTargetPos.z - e.mesh.position.z;
-                const toLen = Math.hypot(toTargetX, toTargetZ) || 1;
-                const perpX = -toTargetZ / toLen;
-                const perpZ = toTargetX / toLen;
-                const flankSign = e.flankSign || 1;
-                let lateralSpread = 0;
-                if (e.flankTactic === 'west_bridge_pincer') lateralSpread = -12.5;
-                else if (e.flankTactic === 'east_bridge_pincer') lateralSpread = 12.5;
-                else if (e.flankTactic === 'canyon_rim_envelopment') lateralSpread = flankSign * 15.0;
-                else if (e.flankTactic === 'rear_eco_raid') lateralSpread = flankSign * 11.5;
-
-                const blend = Math.min(1.0, (bestDist - 9.0) / 22.0);
-                const candidateX = rawTargetPos.x + perpX * lateralSpread * blend;
-                const candidateZ = rawTargetPos.z + perpZ * lateralSpread * blend;
-                if (e.isAir || (typeof isWalkableGround === 'function' && isWalkableGround(candidateX, candidateZ, (e.radius || 0.50) * 0.6))) {
-                    if (!e._flankScratch) e._flankScratch = new THREE.Vector3();
-                    attackNavTarget = e._flankScratch.set(candidateX, rawTargetPos.y || 0, candidateZ);
-                }
-            }
-
-            let enemyAimPos = null;
-            if (bestTarget && attackNavTarget) {
-                let tPos = isBuildingTarget ? bestTarget.pos : bestTarget.mesh.position;
-                enemyAimPos = tPos;
-                let targetRad = isBuildingTarget ? (bestTarget.footprintRadius || 1.65) : (bestTarget.radius || 0.55);
-                let engageRange = e.range + targetRad + 0.45;
-
-                // Physical Turret Shield Barrier Check via pre-filtered BUILDING_COUNTS.activeShieldTurrets
-                let blockingShieldTurret = null;
-                const activeTurrets = BUILDING_COUNTS.activeShieldTurrets;
-                for (let bi = 0; bi < activeTurrets.length; bi++) {
-                    const b = activeTurrets[bi];
-                    const dEnemyToTurret = Math.hypot(e.mesh.position.x - b.pos.x, e.mesh.position.z - b.pos.z);
-                    const dTargetToTurret = Math.hypot(tPos.x - b.pos.x, tPos.z - b.pos.z);
-                    if (dTargetToTurret <= 9.5 || dEnemyToTurret <= 9.5 + (e.radius || 0.55) + 1.2) {
-                        blockingShieldTurret = b;
-                        break;
-                    }
-                }
-                if (blockingShieldTurret) {
-                    const dToTurret = Math.hypot(e.mesh.position.x - blockingShieldTurret.pos.x, e.mesh.position.z - blockingShieldTurret.pos.z);
-                    const shieldPerimeter = 9.5 + (e.radius || 0.55);
-                    if (dToTurret <= shieldPerimeter + Math.max(e.range, 0.85)) {
-                        bestTarget = blockingShieldTurret;
+                // Fallback to player's base or start sector if no units/buildings matched
+                if (!bestTarget) {
+                    e.aiState = 'SEARCHING';
+                    if (state.baseBuilding && state.baseBuilding.hp > 0 && state.baseBuilding.pos) {
+                        bestTarget = state.baseBuilding;
                         isBuildingTarget = true;
-                        tPos = blockingShieldTurret.pos;
-                        enemyAimPos = tPos;
-                        bestDist = dToTurret;
-                        engageRange = shieldPerimeter + Math.max(e.range, 0.85);
-                    }
-                }
-
-                if ((e.variant === 'behemoth' || e.variant === 'gorgon') && bestDist <= Math.max(e.range, engageRange)) {
-                    e.aiState = 'ATTACKING';
-                    if (e.cooldown <= 0) {
-                        e.mesh.userData.attackAnim = 1.0;
-                        _muzzleScratch.set(e.mesh.position.x, e.mesh.position.y + (e.variant === 'gorgon' ? 1.55 : 1.1), e.mesh.position.z);
-                        launchOrdProjectile(_muzzleScratch, bestTarget, e.variant, e.damage, true);
-                        e.cooldown = e.fireRate;
-                        e.lastCombatActionTime = state.elapsedSec;
-                        e.watchdogTimer = 0;
-                    }
-                    if (bestDist > (blockingShieldTurret ? 11.2 : 5.5)) {
-                        const navPt = getGroundNavigationWaypoint(e.mesh.position, attackNavTarget, e);
-                        const stepDir = computeSafeGroundStep(e.mesh.position, navPt, effEnemySpeed, dt, e, enemies, buildings, enemyBuildings);
-                        if (stepDir.lengthSq() > 0.0001) {
-                            e.mesh.position.addScaledVector(stepDir, effEnemySpeed * dt);
-                            alignGroundUnitToTerrain(e.mesh, e.mesh.position.x + stepDir.x, e.mesh.position.z + stepDir.z, dt);
-                            moving = true;
-                            checkAndUnstickGroundUnit(e, navPt, dt);
-                        }
-                    }
-                } else if (bestDist <= engageRange) {
-                    e.aiState = 'ATTACKING';
-                    if (e.isAir) {
-                        smoothAirVehicleTransform(e, tPos.x, tPos.z, 5.8, false, dt);
+                        bestDist = Math.hypot(state.baseBuilding.pos.x - e.mesh.position.x, state.baseBuilding.pos.z - e.mesh.position.z);
                     } else {
-                        alignGroundUnitToTerrain(e.mesh, tPos.x, tPos.z, dt);
-                    }
-
-                    if (e.variant === 'burster') {
-                        if (!isBuildingTarget) {
-                            recordRagdollHitImpulse(bestTarget, e.mesh.position, true);
-                        }
-                        if (typeof spawnBombCrater === 'function') spawnBombCrater(e.mesh.position, 0.55);
-                        applyDamageWithTurretShield(bestTarget, e.damage, e.mesh.position);
-                        spawnCombatFloat(e.mesh.position, e.damage, '#ff5400');
-                        if (bestTarget === state.baseBuilding) updateHUD();
-                        e.aiState = 'DEAD';
-                        e.hp = 0;
-                        continue;
-                    } else if (e.cooldown <= 0) {
-                        e.mesh.userData.attackAnim = 1.0;
-                        e.lastCombatActionTime = state.elapsedSec;
-                        e.watchdogTimer = 0;
-                        if (!isBuildingTarget && bestTarget) {
-                            bestTarget.retaliateTarget = e;
-                        }
-                        if (e.variant === 'spitter' || e.variant === 'behemoth' || e.variant === 'gorgon' || e.variant === 'mutalisk') {
-                            _muzzleScratch.set(
-                                e.mesh.position.x,
-                                e.mesh.position.y + (e.isAir ? -0.15 : (e.variant === 'gorgon' ? 1.55 : 0.7)),
-                                e.mesh.position.z
-                            );
-                            launchOrdProjectile(_muzzleScratch, bestTarget, e.variant, e.damage, true);
-                        } else {
-                            if (!isBuildingTarget) {
-                                recordRagdollHitImpulse(bestTarget, e.mesh.position, e.variant === 'crusher');
-                            }
-                            applyDamageWithTurretShield(bestTarget, e.damage, e.mesh.position);
-                            spawnCombatFloat(blockingShieldTurret ? e.mesh.position : tPos, e.damage, blockingShieldTurret ? '#38bdf8' : '#ff2a4b');
-                            if (bestTarget === state.baseBuilding) updateHUD();
-                        }
-                        e.cooldown = e.fireRate;
-                    }
-                } else if (e.isAir) {
-                    e.aiState = 'MOVING';
-                    const dxAir = attackNavTarget.x - e.mesh.position.x;
-                    const dzAir = attackNavTarget.z - e.mesh.position.z;
-                    const lenAir = Math.hypot(dxAir, dzAir) || 1;
-                    e.mesh.position.x += (dxAir / lenAir) * effEnemySpeed * dt;
-                    e.mesh.position.z += (dzAir / lenAir) * effEnemySpeed * dt;
-                    smoothAirVehicleTransform(e, attackNavTarget.x, attackNavTarget.z, 5.8, true, dt);
-                    moving = true;
-                } else {
-                    if (e.aiState !== 'SPAWNING') e.aiState = 'MOVING';
-                    const navPt = getGroundNavigationWaypoint(e.mesh.position, attackNavTarget, e);
-                    const stepDir = computeSafeGroundStep(e.mesh.position, navPt, effEnemySpeed, dt, e, enemies, buildings, enemyBuildings);
-                    if (stepDir.lengthSq() > 0.0001) {
-                        e.mesh.position.addScaledVector(stepDir, effEnemySpeed * dt);
-                        alignGroundUnitToTerrain(e.mesh, e.mesh.position.x + stepDir.x, e.mesh.position.z + stepDir.z, dt);
-                        moving = true;
-                        checkAndUnstickGroundUnit(e, navPt, dt);
+                        bestTarget = { pos: (state.baseBuilding && state.baseBuilding.pos) || PLAYER_START_POS, hp: 1000, maxHp: 1000, type: 'base' };
+                        isBuildingTarget = true;
+                        bestDist = Math.hypot(bestTarget.pos.x - e.mesh.position.x, bestTarget.pos.z - e.mesh.position.z);
                     }
                 }
 
-                // --- COMBAT WATCHDOG: Recover any unit that has not moved or attacked for watchdogPeriod (~2.4s) ---
-                if (!e.lastActionPos) e.lastActionPos = e.mesh.position.clone();
-                const movedDist = Math.hypot(e.mesh.position.x - e.lastActionPos.x, e.mesh.position.z - e.lastActionPos.z);
-                if (movedDist > 0.45) {
-                    e.lastActionPos.copy(e.mesh.position);
-                    e.watchdogTimer = 0;
-                    e.lastCombatActionTime = state.elapsedSec;
-                } else if (e.aiState !== 'ATTACKING') {
-                    e.watchdogTimer = (e.watchdogTimer || 0) + dt;
-                    if (e.watchdogTimer >= (e.watchdogPeriod || 2.4)) {
-                        e.watchdogTimer = 0;
-                        e.recoveryAttempts = (e.recoveryAttempts || 0) + 1;
-                        // 1. Reacquire target & clear cached navigation waypoints
-                        e.lockedTarget = null;
-                        e.targetLockTimer = 0;
-                        e.navWaypoints = null;
-                        if (typeof RIVER_BRIDGES !== 'undefined' && RIVER_BRIDGES.length > 0) {
-                            e.preferredBridgeIdx = ((e.preferredBridgeIdx || 0) + 1) % RIVER_BRIDGES.length;
+                const validTargetPos = isBuildingTarget
+                    ? (bestTarget.pos || PLAYER_START_POS)
+                    : ((bestTarget.mesh && bestTarget.mesh.position) ? bestTarget.mesh.position : (bestTarget.pos || PLAYER_START_POS));
+                bestDist = Math.hypot(validTargetPos.x - e.mesh.position.x, validTargetPos.z - e.mesh.position.z);
+                e.currentTargetDist = bestDist;
+
+                let moving = false;
+
+                if ((e.variant === 'skitterer' || e.variant === 'burster') && !e.isAir) {
+                    e.burrowCooldown = (e.burrowCooldown || 0) - dt;
+                    if (!e.burrowed && e.burrowCooldown <= 0 && bestDist > 16.0 && Math.abs(e.mesh.position.z) < 22 && Math.random() < 0.015) {
+                        e.burrowed = true;
+                        e.burrowTimer = 2.4;
+                        e.mesh.position.y -= 0.45;
+                    }
+                    if (e.burrowed) {
+                        e.burrowTimer = (e.burrowTimer === undefined ? 2.4 : e.burrowTimer) - dt;
+                        if (bestDist <= 9.5 || e.burrowTimer <= 0 || isZergLosing) {
+                            e.burrowed = false;
+                            e.mesh.position.y = getTerrainHeight(e.mesh.position.x, e.mesh.position.z);
+                            e.burrowCooldown = 18.0;
+                            e.aiState = 'MOVING';
+                            if (bestDist <= 9.5) {
+                                spawnCombatFloat(e.mesh.position, 'AMBUSH!', '#ff2a4b');
+                            }
+                        } else {
+                            updateUnitAnimation(e.mesh, dt, false, null);
+                            continue;
                         }
-                        // 2. Safe recovery step toward clear walkable terrain toward target
-                        if (!e.isAir) {
-                            const toTX = tPos.x - e.mesh.position.x;
-                            const toTZ = tPos.z - e.mesh.position.z;
-                            const baseAng = Math.atan2(toTX, toTZ);
-                            const offsets = [0, 0.85, -0.85, 1.55, -1.55, 2.35, -2.35];
-                            for (let oi = 0; oi < offsets.length; oi++) {
-                                const tryAng = baseAng + offsets[oi];
-                                const rx = e.mesh.position.x + Math.sin(tryAng) * 2.2;
-                                const rz = e.mesh.position.z + Math.cos(tryAng) * 2.2;
-                                if (typeof isWalkableGround === 'function' && isWalkableGround(rx, rz, (e.radius || 0.5) * 0.6)) {
-                                    e.mesh.position.x = rx;
-                                    e.mesh.position.z = rz;
-                                    e.mesh.position.y = getTerrainHeight(rx, rz);
-                                    e.lastActionPos.copy(e.mesh.position);
-                                    moving = true;
-                                    break;
+                    }
+                }
+
+                let rawTargetPos = validTargetPos;
+                let attackNavTarget = rawTargetPos;
+
+                if ((isZergLosing || e.isFlanker) && bestDist > 10.5) {
+                    const toTargetX = rawTargetPos.x - e.mesh.position.x;
+                    const toTargetZ = rawTargetPos.z - e.mesh.position.z;
+                    const toLen = Math.hypot(toTargetX, toTargetZ) || 1;
+                    const perpX = -toTargetZ / toLen;
+                    const perpZ = toTargetX / toLen;
+                    const flankSign = e.flankSign || 1;
+                    let lateralSpread = 0;
+                    if (e.flankTactic === 'west_bridge_pincer') lateralSpread = -12.5;
+                    else if (e.flankTactic === 'east_bridge_pincer') lateralSpread = 12.5;
+                    else if (e.flankTactic === 'canyon_rim_envelopment') lateralSpread = flankSign * 15.0;
+                    else if (e.flankTactic === 'rear_eco_raid') lateralSpread = flankSign * 11.5;
+
+                    const blend = Math.min(1.0, (bestDist - 9.0) / 22.0);
+                    const candidateX = rawTargetPos.x + perpX * lateralSpread * blend;
+                    const candidateZ = rawTargetPos.z + perpZ * lateralSpread * blend;
+                    if (e.isAir || (typeof isWalkableGround === 'function' && isWalkableGround(candidateX, candidateZ, (e.radius || 0.50) * 0.6))) {
+                        if (!e._flankScratch) e._flankScratch = new THREE.Vector3();
+                        attackNavTarget = e._flankScratch.set(candidateX, rawTargetPos.y || 0, candidateZ);
+                    }
+                }
+
+                let enemyAimPos = null;
+                if (bestTarget && attackNavTarget) {
+                    let tPos = validTargetPos;
+                    enemyAimPos = tPos;
+                    let targetRad = isBuildingTarget ? (bestTarget.footprintRadius || 1.65) : (bestTarget.radius || 0.55);
+                    let engageRange = (e.range || 1.5) + targetRad + 0.45;
+
+                    // Physical Turret Shield Barrier Check via pre-filtered BUILDING_COUNTS.activeShieldTurrets
+                    let blockingShieldTurret = null;
+                    const activeTurrets = BUILDING_COUNTS.activeShieldTurrets;
+                    for (let bi = 0; bi < activeTurrets.length; bi++) {
+                        const b = activeTurrets[bi];
+                        if (!b || !b.pos || b.hp <= 0) continue;
+                        const dEnemyToTurret = Math.hypot(e.mesh.position.x - b.pos.x, e.mesh.position.z - b.pos.z);
+                        const dTargetToTurret = Math.hypot(tPos.x - b.pos.x, tPos.z - b.pos.z);
+                        if (dTargetToTurret <= 9.5 || dEnemyToTurret <= 9.5 + (e.radius || 0.55) + 1.2) {
+                            blockingShieldTurret = b;
+                            break;
+                        }
+                    }
+                    if (blockingShieldTurret) {
+                        const dToTurret = Math.hypot(e.mesh.position.x - blockingShieldTurret.pos.x, e.mesh.position.z - blockingShieldTurret.pos.z);
+                        const shieldPerimeter = 9.5 + (e.radius || 0.55);
+                        if (dToTurret <= shieldPerimeter + Math.max(e.range || 1.5, 0.85)) {
+                            bestTarget = blockingShieldTurret;
+                            isBuildingTarget = true;
+                            tPos = blockingShieldTurret.pos;
+                            enemyAimPos = tPos;
+                            bestDist = dToTurret;
+                            engageRange = shieldPerimeter + Math.max(e.range || 1.5, 0.85);
+                        }
+                    }
+
+                    if ((e.variant === 'behemoth' || e.variant === 'gorgon') && bestDist <= Math.max(e.range || 8.0, engageRange)) {
+                        e.aiState = 'ATTACKING';
+                        e.lastNavResult = 'in_attack_range';
+                        if (e.cooldown <= 0) {
+                            e.mesh.userData.attackAnim = 1.0;
+                            _muzzleScratch.set(e.mesh.position.x, e.mesh.position.y + (e.variant === 'gorgon' ? 1.55 : 1.1), e.mesh.position.z);
+                            launchOrdProjectile(_muzzleScratch, bestTarget, e.variant, e.damage, true);
+                            e.cooldown = e.fireRate || 1.4;
+                            e.lastCombatActionTime = state.elapsedSec;
+                            e.lastAttackTime = state.elapsedSec;
+                            e.watchdogTimer = 0;
+                        }
+                        if (bestDist > (blockingShieldTurret ? 11.2 : 5.5)) {
+                            moving = advanceGroundZergToward(attackNavTarget);
+                        } else {
+                            alignGroundUnitToTerrain(e.mesh, tPos.x, tPos.z, dt);
+                        }
+                    } else if (bestDist <= engageRange) {
+                        e.aiState = 'ATTACKING';
+                        e.lastNavResult = 'in_attack_range';
+                        if (e.isAir) {
+                            smoothAirVehicleTransform(e, tPos.x, tPos.z, 5.8, false, dt);
+                        } else {
+                            alignGroundUnitToTerrain(e.mesh, tPos.x, tPos.z, dt);
+                        }
+
+                        if (e.variant === 'burster') {
+                            if (!isBuildingTarget) {
+                                recordRagdollHitImpulse(bestTarget, e.mesh.position, true);
+                            }
+                            if (typeof spawnBombCrater === 'function') spawnBombCrater(e.mesh.position, 0.55);
+                            applyDamageWithTurretShield(bestTarget, e.damage, e.mesh.position);
+                            spawnCombatFloat(e.mesh.position, e.damage, '#ff5400');
+                            if (bestTarget === state.baseBuilding) updateHUD();
+                            e.lastAttackTime = state.elapsedSec;
+                            e.aiState = 'DEAD';
+                            e.hp = 0;
+                            continue;
+                        } else if (e.cooldown <= 0) {
+                            e.mesh.userData.attackAnim = 1.0;
+                            e.lastCombatActionTime = state.elapsedSec;
+                            e.lastAttackTime = state.elapsedSec;
+                            e.watchdogTimer = 0;
+                            if (!isBuildingTarget && bestTarget) {
+                                bestTarget.retaliateTarget = e;
+                            }
+                            if (e.variant === 'spitter' || e.variant === 'behemoth' || e.variant === 'gorgon' || e.variant === 'mutalisk') {
+                                _muzzleScratch.set(
+                                    e.mesh.position.x,
+                                    e.mesh.position.y + (e.isAir ? -0.15 : (e.variant === 'gorgon' ? 1.55 : 0.7)),
+                                    e.mesh.position.z
+                                );
+                                launchOrdProjectile(_muzzleScratch, bestTarget, e.variant, e.damage, true);
+                            } else {
+                                if (!isBuildingTarget) {
+                                    recordRagdollHitImpulse(bestTarget, e.mesh.position, e.variant === 'crusher');
+                                }
+                                applyDamageWithTurretShield(bestTarget, e.damage, e.mesh.position);
+                                spawnCombatFloat(blockingShieldTurret ? e.mesh.position : tPos, e.damage, blockingShieldTurret ? '#38bdf8' : '#ff2a4b');
+                                if (bestTarget === state.baseBuilding) updateHUD();
+                            }
+                            e.cooldown = e.fireRate || 1.0;
+                        }
+                    } else if (e.isAir) {
+                        e.aiState = 'MOVING';
+                        const dxAir = attackNavTarget.x - e.mesh.position.x;
+                        const dzAir = attackNavTarget.z - e.mesh.position.z;
+                        const lenAir = Math.hypot(dxAir, dzAir) || 1;
+                        e.mesh.position.x += (dxAir / lenAir) * effEnemySpeed * dt;
+                        e.mesh.position.z += (dzAir / lenAir) * effEnemySpeed * dt;
+                        smoothAirVehicleTransform(e, attackNavTarget.x, attackNavTarget.z, 5.8, true, dt);
+                        e.lastNavResult = 'air_direct';
+                        e.lastMoveTime = state.elapsedSec;
+                        moving = true;
+                    } else {
+                        if (e.aiState !== 'SPAWNING') e.aiState = 'MOVING';
+                        moving = advanceGroundZergToward(attackNavTarget);
+                    }
+
+                    // --- COMBAT WATCHDOG: Recover any unit that has not moved or attacked for watchdogPeriod (~2.2s) ---
+                    if (!e.lastActionPos) e.lastActionPos = e.mesh.position.clone();
+                    const movedDist = Math.hypot(e.mesh.position.x - e.lastActionPos.x, e.mesh.position.z - e.lastActionPos.z);
+                    if (movedDist > 0.35) {
+                        e.lastActionPos.copy(e.mesh.position);
+                        e.watchdogTimer = 0;
+                        e.lastCombatActionTime = state.elapsedSec;
+                        e.lastMoveTime = state.elapsedSec;
+                    } else if (e.aiState !== 'ATTACKING') {
+                        e.watchdogTimer = (e.watchdogTimer || 0) + dt;
+                        if (e.watchdogTimer >= (e.watchdogPeriod || 2.2)) {
+                            e.watchdogTimer = 0;
+                            e.recoveryAttempts = (e.recoveryAttempts || 0) + 1;
+                            e.lastRecoveryTime = state.elapsedSec;
+                            // 1. Reacquire target & clear cached navigation waypoints
+                            e.lockedTarget = null;
+                            e.targetLockTimer = 0;
+                            e.navWaypoints = null;
+                            if (typeof RIVER_BRIDGES !== 'undefined' && RIVER_BRIDGES.length > 0) {
+                                e.preferredBridgeIdx = ((e.preferredBridgeIdx || 0) + 1) % RIVER_BRIDGES.length;
+                            }
+                            // 2. Safe recovery step toward clear walkable terrain toward target
+                            if (!e.isAir) {
+                                const toTX = tPos.x - e.mesh.position.x;
+                                const toTZ = tPos.z - e.mesh.position.z;
+                                const baseAng = Math.atan2(toTX, toTZ);
+                                const offsets = [0, 0.78, -0.78, 1.45, -1.45, 2.2, -2.2, Math.PI];
+                                for (let oi = 0; oi < offsets.length; oi++) {
+                                    const tryAng = baseAng + offsets[oi];
+                                    const rx = e.mesh.position.x + Math.sin(tryAng) * 2.2;
+                                    const rz = e.mesh.position.z + Math.cos(tryAng) * 2.2;
+                                    if (typeof isWalkableGround !== 'function' || isWalkableGround(rx, rz, (e.radius || 0.5) * 0.5) || oi === offsets.length - 1) {
+                                        e.mesh.position.x = rx;
+                                        e.mesh.position.z = rz;
+                                        e.mesh.position.y = getTerrainHeight(rx, rz);
+                                        e.lastActionPos.copy(e.mesh.position);
+                                        e.lastNavResult = 'watchdog_recovery';
+                                        e.lastMoveTime = state.elapsedSec;
+                                        moving = true;
+                                        break;
+                                    }
                                 }
                             }
+                            e.aiState = 'MOVING';
                         }
-                        e.aiState = 'MOVING';
                     }
                 }
-            }
 
-            const eVisFow = isWorldPosVisible(e.mesh.position.x, e.mesh.position.z);
-            const eInViewport = eVisFow && window.isWorldPosInViewport(e.mesh.position.x, e.mesh.position.y, e.mesh.position.z, 3.8);
-            e.mesh.visible = eInViewport;
-            if (eInViewport) {
-                if (!e.isAir && typeof window.updateZergUnitBruiseDamage === 'function') {
-                    window.updateZergUnitBruiseDamage(e);
+                // Fog-of-War & Viewport visibility ONLY controls rendering, never AI simulation!
+                const eVisFow = isWorldPosVisible(e.mesh.position.x, e.mesh.position.z);
+                const eInViewport = eVisFow && window.isWorldPosInViewport(e.mesh.position.x, e.mesh.position.y, e.mesh.position.z, 3.8);
+                e.mesh.visible = eInViewport;
+                if (eInViewport) {
+                    if (!e.isAir && typeof window.updateZergUnitBruiseDamage === 'function') {
+                        window.updateZergUnitBruiseDamage(e);
+                    }
+                    updateUnitAnimation(e.mesh, dt, moving, enemyAimPos);
+                    updateHealthPip(e.hb, e.hp, e.maxHp, 0, 0);
+                    projectToScreen(e.hb.root, e.mesh.position, e.isAir ? 1.25 : (e.variant === 'behemoth' ? 1.8 : 1.15));
+                } else if (e.hb && e.hb.root && e.hb.root.style.display !== 'none') {
+                    e.hb.root.style.display = 'none';
                 }
-                updateUnitAnimation(e.mesh, dt, moving, enemyAimPos);
-                updateHealthPip(e.hb, e.hp, e.maxHp, 0, 0);
-                projectToScreen(e.hb.root, e.mesh.position, e.isAir ? 1.25 : (e.variant === 'behemoth' ? 1.8 : 1.15));
-            } else if (e.hb && e.hb.root && e.hb.root.style.display !== 'none') {
-                e.hb.root.style.display = 'none';
+            } catch (unitErr) {
+                e.lastError = (unitErr && unitErr.message) ? unitErr.message : String(unitErr);
+                if (window.APP_ERROR_HANDLER && typeof window.APP_ERROR_HANDLER.record === 'function') {
+                    window.APP_ERROR_HANDLER.record('enemyAI_unit', unitErr, 'ai');
+                }
             }
         }
         if (perfProf) perfProf.end('enemyAI');
@@ -12961,6 +13216,56 @@ window.AMBIENT_AUDIO_ENGINE = {
     }
 };
 
+// ============================================================================
+// ZERG AI DEVELOPER DIAGNOSTIC & WATCHDOG TELEMETRY SYSTEM
+// Exposes real-time per-unit AI state, target, distance, navigation result,
+// movement/attack timestamps, cooldowns, recovery attempts, and errors.
+// ============================================================================
+window.ZERG_AI_DIAGNOSTICS = {
+    getUnitReport(e) {
+        if (!e) return null;
+        const t = e.lockedTarget;
+        let targetDesc = 'none';
+        if (t) {
+            if (t === state.baseBuilding) targetDesc = 'player_base_hq';
+            else if (t.type) targetDesc = `${t.faction || 'ally'}_${t.type}`;
+            else if (t.role) targetDesc = `solaris_${t.role}`;
+            else targetDesc = 'hostile_target';
+        }
+        return {
+            unitId: e.id || 'unassigned',
+            unitType: e.variant || 'skitterer',
+            aiState: e.aiState || 'MOVING',
+            currentTarget: targetDesc,
+            targetDistance: typeof e.currentTargetDist === 'number' ? Number(e.currentTargetDist.toFixed(2)) : null,
+            navigationResult: e.lastNavResult || 'pending',
+            lastSuccessfulMovementTime: Number((e.lastMoveTime || 0).toFixed(2)),
+            lastSuccessfulAttackTime: Number((e.lastAttackTime || 0).toFixed(2)),
+            attackCooldown: Number(Math.max(0, e.cooldown || 0).toFixed(2)),
+            lastRecoveryAttempt: e.recoveryAttempts || 0,
+            lastRecoveryTime: Number((e.lastRecoveryTime || 0).toFixed(2)),
+            currentError: e.lastError || null
+        };
+    },
+    getReport() {
+        const unitReports = [];
+        for (let i = 0; i < enemies.length; i++) {
+            const rep = this.getUnitReport(enemies[i]);
+            if (rep) unitReports.push(rep);
+        }
+        return {
+            timestampSec: Number((state.elapsedSec || 0).toFixed(2)),
+            totalZergUnits: enemies.length,
+            totalZergBuildings: enemyBuildings.length,
+            movingCount: unitReports.filter(r => r.aiState === 'MOVING' || r.aiState === 'SPAWNING').length,
+            attackingCount: unitReports.filter(r => r.aiState === 'ATTACKING').length,
+            units: unitReports
+        };
+    }
+};
+window.getZergAIDiagnosticReport = function() {
+    return window.ZERG_AI_DIAGNOSTICS.getReport();
+};
+
 window.titleScreenActive = true;
 animate(performance.now());
-
